@@ -19,7 +19,9 @@ import {
 import { ZipArchive } from 'archiver';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
+import type { Readable } from 'stream';
 import type { FastifyReply } from 'fastify';
+import { createCbzZipEntryReadStream } from '../../common/cbz-zip-reader';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { contentDispositionHeader } from '../../common/utils/content-disposition.utils';
@@ -302,7 +304,11 @@ export class BookController {
       reply.raw.setHeader('Content-Disposition', contentDispositionHeader('attachment', plan.archiveFilename || 'books.zip', 'books.zip'));
       archive.pipe(reply.raw);
       for (const file of plan.files) {
-        archive.file(file.absolutePath, { name: file.zipPath });
+        if (file.archive) {
+          archive.append(createCbzZipEntryReadStream(file.archive.archivePath, file.archive.entry) as unknown as Readable, { name: file.zipPath });
+        } else {
+          archive.file(file.absolutePath, { name: file.zipPath });
+        }
       }
       await Promise.race([archive.finalize(), archiveFailure]);
 
@@ -395,13 +401,21 @@ export class BookController {
     @Headers('range') rangeHeader: string | undefined,
     @Res() reply: FastifyReply,
   ) {
-    const { path, size, format, originalFilename } = await this.bookService.getFileInfo(fileId, user);
+    const { path, size, format, originalFilename, archive } = await this.bookService.getFileInfo(fileId, user);
     const mimeType = resolveBookMimeType(format);
     const filename = originalFilename;
 
-    reply.header('Accept-Ranges', 'bytes');
     reply.header('Content-Disposition', contentDispositionHeader('inline', filename, 'download'));
     reply.type(mimeType);
+
+    if (archive) {
+      // Archive-backed files stream a single ZIP entry; byte ranges are not supported for them.
+      reply.header('Content-Length', size);
+      reply.send(createCbzZipEntryReadStream(archive.archivePath, archive.entry));
+      return;
+    }
+
+    reply.header('Accept-Ranges', 'bytes');
 
     if (rangeHeader) {
       const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
@@ -433,7 +447,7 @@ export class BookController {
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] fileId=${fileId} userId=${user.id} - download file started`);
     try {
-      const { path, size, format, bookId } = await this.bookService.getFileInfo(fileId, user);
+      const { path, size, format, bookId, archive } = await this.bookService.getFileInfo(fileId, user);
       const mimeType = resolveBookMimeType(format);
       const filename = await this.bookService.resolveDownloadFilename({ bookId, absolutePath: path, format: format === 'unknown' ? null : format });
 
@@ -441,7 +455,11 @@ export class BookController {
       reply.header('Content-Disposition', contentDispositionHeader('attachment', filename, 'download'));
       reply.type(mimeType);
       reply.header('Content-Length', size);
-      reply.send(createReadStream(path));
+      if (archive) {
+        reply.send(createCbzZipEntryReadStream(archive.archivePath, archive.entry));
+      } else {
+        reply.send(createReadStream(path));
+      }
       this.logger.log(
         `[${event}] [end] fileId=${fileId} userId=${user.id} durationMs=${Date.now() - startedAt} sizeBytes=${size} - download file completed`,
       );

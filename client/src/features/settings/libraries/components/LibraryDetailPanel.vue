@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatDate, formatList, formatPercent } from '@/i18n/formatters'
 import { METADATA_LABELS } from '@/features/library/composables/useLibraryCreator'
+import InpxArchivesPanel from '@/features/inpx/components/InpxArchivesPanel.vue'
 import LibraryScanHistory from './LibraryScanHistory.vue'
 
 const props = defineProps<{
@@ -170,5 +171,7 @@ function requestEdit() {
       </p>
       <LibraryScanHistory v-else :entries="history" />
     </section>
+
+    <InpxArchivesPanel :library-id="library.id" />
   </section>
 </template>

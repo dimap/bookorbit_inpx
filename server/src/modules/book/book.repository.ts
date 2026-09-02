@@ -42,6 +42,7 @@ import {
   collectionBooks,
   collections,
   genres,
+  inpxArchives,
   koboDevices,
   koboLibrarySnapshots,
   koboReadingStates,
@@ -1466,12 +1467,20 @@ export class BookRepository {
         fileHash: bookFiles.fileHash,
         sizeBytes: bookFiles.sizeBytes,
         durationSeconds: bookFiles.durationSeconds,
+        storageKind: bookFiles.storageKind,
+        archiveEntryPath: bookFiles.archiveEntryPath,
+        inpxArchiveId: bookFiles.inpxArchiveId,
       })
       .from(bookFiles)
       .innerJoin(books, eq(books.id, bookFiles.bookId))
       .where(eq(bookFiles.id, fileId))
       .limit(1);
     return file ?? null;
+  }
+
+  async findInpxArchiveAbsolutePath(archiveId: number): Promise<string | null> {
+    const [row] = await this.db.select({ absolutePath: inpxArchives.absolutePath }).from(inpxArchives).where(eq(inpxArchives.id, archiveId)).limit(1);
+    return row?.absolutePath ?? null;
   }
 
   async deleteBookFile(fileId: number): Promise<void> {
@@ -1843,12 +1852,28 @@ export class BookRepository {
     return row ?? null;
   }
 
-  async findPrimaryFilesByBookIds(
-    bookIds: number[],
-  ): Promise<{ bookId: number; absolutePath: string; format: string | null; sizeBytes: number | null }[]> {
+  async findPrimaryFilesByBookIds(bookIds: number[]): Promise<
+    {
+      bookId: number;
+      absolutePath: string;
+      format: string | null;
+      sizeBytes: number | null;
+      storageKind: string | null;
+      archiveEntryPath: string | null;
+      inpxArchiveId: number | null;
+    }[]
+  > {
     if (bookIds.length === 0) return [];
     return this.db
-      .select({ bookId: books.id, absolutePath: bookFiles.absolutePath, format: bookFiles.format, sizeBytes: bookFiles.sizeBytes })
+      .select({
+        bookId: books.id,
+        absolutePath: bookFiles.absolutePath,
+        format: bookFiles.format,
+        sizeBytes: bookFiles.sizeBytes,
+        storageKind: bookFiles.storageKind,
+        archiveEntryPath: bookFiles.archiveEntryPath,
+        inpxArchiveId: bookFiles.inpxArchiveId,
+      })
       .from(books)
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
       .where(inArray(books.id, bookIds))
@@ -1874,9 +1899,18 @@ export class BookRepository {
       .orderBy(asc(books.id));
   }
 
-  async findAllFilesByBookIds(
-    bookIds: number[],
-  ): Promise<{ bookId: number; absolutePath: string; format: string | null; sizeBytes: number | null; sortOrder: number }[]> {
+  async findAllFilesByBookIds(bookIds: number[]): Promise<
+    {
+      bookId: number;
+      absolutePath: string;
+      format: string | null;
+      sizeBytes: number | null;
+      sortOrder: number;
+      storageKind: string | null;
+      archiveEntryPath: string | null;
+      inpxArchiveId: number | null;
+    }[]
+  > {
     if (bookIds.length === 0) return [];
     return this.db
       .select({
@@ -1885,6 +1919,9 @@ export class BookRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         sortOrder: bookFiles.sortOrder,
+        storageKind: bookFiles.storageKind,
+        archiveEntryPath: bookFiles.archiveEntryPath,
+        inpxArchiveId: bookFiles.inpxArchiveId,
       })
       .from(bookFiles)
       .where(inArray(bookFiles.bookId, bookIds))

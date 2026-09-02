@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { watch, type FSWatcher } from 'chokidar';
-import { eq } from 'drizzle-orm';
+import { and, eq, notLike } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { dirname, sep } from 'path';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
@@ -54,7 +54,10 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       const watchedLibraries = await this.db.select().from(libraries).where(eq(libraries.watch, true));
       let failedWatcherCount = 0;
       for (const lib of watchedLibraries) {
-        const folders = await this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, lib.id));
+        const folders = await this.db
+          .select()
+          .from(libraryFolders)
+          .where(and(eq(libraryFolders.libraryId, lib.id), notLike(libraryFolders.path, 'inpx://%')));
         try {
           await this.startWatcher(
             lib.id,

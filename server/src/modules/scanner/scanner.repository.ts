@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, ne, notLike, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
@@ -96,7 +96,10 @@ export class ScannerRepository {
   // ── Library Folders ────────────────────────────────────────────────────────
 
   async findLibraryFolders(libraryId: number) {
-    return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+    return this.db
+      .select()
+      .from(libraryFolders)
+      .where(and(eq(libraryFolders.libraryId, libraryId), notLike(libraryFolders.path, 'inpx://%')));
   }
 
   async findLibrarySettings(libraryId: number) {

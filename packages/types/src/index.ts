@@ -33,6 +33,7 @@ export * from "./opds";
 export * from "./kobo";
 export * from "./koreader";
 export * from "./book-dock";
+export * from "./inpx";
 export * from "./book-request";
 export * from "./book-request-automation";
 export * from "./book-request-destination";

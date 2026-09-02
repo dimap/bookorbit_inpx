@@ -68,6 +68,7 @@ import { ReadingStateModule } from './modules/reading-state/reading-state.module
 import { UserBookStatusModule } from './modules/user-book-status/user-book-status.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { MigrationModule } from './modules/migration/migration.module';
+import { InpxModule } from './modules/inpx/inpx.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { SeriesModule } from './modules/series/series.module';
 import { EntityManagerModule } from './modules/entity-manager/entity-manager.module';
@@ -153,6 +154,7 @@ import { BookMoveModule } from './modules/book-move/book-move.module';
     UserBookStatusModule,
     AuditModule,
     MigrationModule,
+    InpxModule,
     NotificationModule,
     SeriesModule,
     EntityManagerModule,

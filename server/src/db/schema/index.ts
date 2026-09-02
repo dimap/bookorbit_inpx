@@ -19,6 +19,7 @@ export * from './oidc';
 export * from './opds';
 export * from './kobo';
 export * from './book-dock';
+export * from './inpx';
 export * from './book-requests';
 export * from './download-clients';
 export * from './request-indexers';

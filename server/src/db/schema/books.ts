@@ -16,6 +16,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import { timestamptz } from './columns';
+import { inpxArchives } from './inpx';
 import { libraryFolders, libraries } from './libraries';
 
 export const books = pgTable(
@@ -76,7 +77,7 @@ export const bookFiles = pgTable(
       .references(() => libraryFolders.id, { onDelete: 'cascade' }),
     absolutePath: varchar('absolute_path', { length: 4096 }).notNull(),
     relPath: varchar('rel_path', { length: 4096 }),
-    ino: numeric('ino', { precision: 20, scale: 0, mode: 'bigint' }).notNull(),
+    ino: numeric('ino', { precision: 20, scale: 0, mode: 'bigint' }),
     sizeBytes: bigint('size_bytes', { mode: 'number' }),
     mtime: timestamp('mtime', { withTimezone: true }),
     fileHash: varchar('file_hash', { length: 32 }),
@@ -86,6 +87,11 @@ export const bookFiles = pgTable(
     durationSeconds: integer('duration_seconds'),
     // null means "not determined yet"; rows predating this column are backfilled lazily on Kobo sync.
     isFixedLayout: boolean('is_fixed_layout'),
+    // 'filesystem' rows point at a real path; 'inpx' rows live inside an INPX archive and resolve
+    // their bytes through `inpxArchiveId` + `archiveEntryPath`.
+    storageKind: varchar('storage_kind', { length: 20 }).notNull().default('filesystem'),
+    archiveEntryPath: varchar('archive_entry_path', { length: 4096 }),
+    inpxArchiveId: integer('inpx_archive_id').references(() => inpxArchives.id, { onDelete: 'cascade' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
@@ -99,6 +105,7 @@ export const bookFiles = pgTable(
     index('book_files_file_hash_idx').on(t.fileHash),
     index('book_files_ino_idx').on(t.ino),
     index('book_files_format_idx').on(t.format),
+    index('book_files_inpx_archive_id_idx').on(t.inpxArchiveId),
     index('book_files_library_folder_file_hash_idx').on(t.libraryFolderId, t.fileHash),
     index('book_files_library_folder_ino_idx').on(t.libraryFolderId, t.ino),
     foreignKey({
@@ -109,6 +116,8 @@ export const bookFiles = pgTable(
       .onUpdate('cascade')
       .onDelete('cascade'),
     check('book_files_role_chk', sql`${t.role} in ('content', 'cover', 'metadata', 'supplement')`),
+    check('book_files_storage_kind_chk', sql`${t.storageKind} in ('filesystem', 'inpx')`),
+    check('book_files_inpx_entry_chk', sql`(${t.storageKind} <> 'inpx') or (${t.archiveEntryPath} is not null and ${t.inpxArchiveId} is not null)`),
     check('book_files_size_bytes_nonnegative_chk', sql`${t.sizeBytes} is null or ${t.sizeBytes} >= 0`),
     check('book_files_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} is null or ${t.durationSeconds} >= 0`),
   ],
