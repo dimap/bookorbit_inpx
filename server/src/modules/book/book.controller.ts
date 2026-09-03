@@ -21,7 +21,6 @@ import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import type { Readable } from 'stream';
 import type { FastifyReply } from 'fastify';
-import { createCbzZipEntryReadStream } from '../../common/cbz-zip-reader';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { contentDispositionHeader } from '../../common/utils/content-disposition.utils';
@@ -305,7 +304,8 @@ export class BookController {
       archive.pipe(reply.raw);
       for (const file of plan.files) {
         if (file.archive) {
-          archive.append(createCbzZipEntryReadStream(file.archive.archivePath, file.archive.entry) as unknown as Readable, { name: file.zipPath });
+          const read = await file.archive.container.readEntryStream(file.archive.entryName);
+          if (read) archive.append(read.stream as unknown as Readable, { name: file.zipPath });
         } else {
           archive.file(file.absolutePath, { name: file.zipPath });
         }
@@ -409,9 +409,11 @@ export class BookController {
     reply.type(mimeType);
 
     if (archive) {
-      // Archive-backed files stream a single ZIP entry; byte ranges are not supported for them.
+      // Archive-backed files stream a single entry; byte ranges are not supported for them.
+      const read = await archive.container.readEntryStream(archive.entryName);
+      if (!read) throw new NotFoundException('File entry not found in archive');
       reply.header('Content-Length', size);
-      reply.send(createCbzZipEntryReadStream(archive.archivePath, archive.entry));
+      reply.send(read.stream);
       return;
     }
 
@@ -456,7 +458,9 @@ export class BookController {
       reply.type(mimeType);
       reply.header('Content-Length', size);
       if (archive) {
-        reply.send(createCbzZipEntryReadStream(archive.archivePath, archive.entry));
+        const read = await archive.container.readEntryStream(archive.entryName);
+        if (!read) throw new NotFoundException('File entry not found in archive');
+        reply.send(read.stream);
       } else {
         reply.send(createReadStream(path));
       }

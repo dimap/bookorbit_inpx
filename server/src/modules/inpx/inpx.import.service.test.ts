@@ -5,17 +5,22 @@ import { InpxParser } from './inpx.parser';
 import { InpxRepository } from './inpx.repository';
 import { MetadataService } from '../metadata/metadata.service';
 
-vi.mock('../../common/cbz-zip-reader', () => ({
-  readCbzZipIndex: vi.fn(),
-  extractCbzZipEntry: vi.fn(),
-  createCbzZipEntryReadStream: vi.fn(),
+vi.mock('../../common/inpx-container', () => ({
+  openInpxContainer: vi.fn(),
+  normalizeEntryName: (name: string) => name,
 }));
-import { extractCbzZipEntry, readCbzZipIndex } from '../../common/cbz-zip-reader';
+import { openInpxContainer } from '../../common/inpx-container';
 
-const ZIP_ENTRIES = [
-  { name: 'r/rus00001.fb2', compression: 8, compressedSize: 10, uncompressedSize: 10, localHeaderOffset: 0, dataStart: 0 },
-  { name: 'r/rus00002.fb2', compression: 8, compressedSize: 10, uncompressedSize: 10, localHeaderOffset: 0, dataStart: 0 },
-];
+const FAKE_CONTAINER = {
+  kind: 'zip',
+  entries: [
+    { name: 'r/rus00001.fb2', size: 10 },
+    { name: 'r/rus00002.fb2', size: 10 },
+  ],
+  readEntry: () => Promise.resolve(Buffer.from('<FictionBook/>')),
+  readEntryStream: () => Promise.resolve({ stream: Buffer.from('<FictionBook/>'), size: 10 }),
+  close: () => Promise.resolve(),
+};
 
 describe('InpxImportService', () => {
   const repo = {
@@ -75,8 +80,7 @@ describe('InpxImportService', () => {
       failedIndexEntries: [],
     });
     metadataService.extractAndSave.mockResolvedValue(undefined);
-    (readCbzZipIndex as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ entries: ZIP_ENTRIES, comment: null });
-    (extractCbzZipEntry as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(Buffer.from('<FictionBook/>'));
+    (openInpxContainer as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(FAKE_CONTAINER);
   });
 
   it('imports the index, enriches from the archive and marks the archive complete', async () => {

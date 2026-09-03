@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { extractCbzZipEntry, readCbzZipIndex, type CbzZipEntry } from '../../common/cbz-zip-reader';
+import { normalizeEntryName, openInpxContainer } from '../../common/inpx-container';
 import { resolveFb2GenreName } from './fb2-genres';
 
 type SqlRow = Record<string, unknown>;
@@ -86,84 +86,70 @@ interface InpxBookRow {
 
 export class InpxParser {
   /**
-   * Parses a self-contained INPX archive (a ZIP holding `.inp` SQLite indexes and the FB2 files
-   * they reference) into normalized book records. The `.inp` files are streamed to temp files and
-   * read with the built-in SQLite driver; books marked deleted in the index and books whose file is
-   * not actually inside the archive are skipped.
+   * Parses a self-contained INPX archive (a ZIP or 7z holding `.inp` SQLite indexes and the FB2
+   * files they reference) into normalized book records. The `.inp` files are streamed to temp files
+   * and read with the built-in SQLite driver; books marked deleted in the index and books whose
+   * file is not actually inside the archive are skipped.
    */
   async parse(archivePath: string): Promise<InpxParseResult> {
-    const index = await readCbzZipIndex(archivePath);
-    if (!index) {
-      throw new Error('INPX archive could not be read as a ZIP file');
-    }
-    if (index.entries.length > MAX_ARCHIVE_ENTRIES) {
-      throw new Error(`INPX archive has too many entries: ${index.entries.length}`);
-    }
-
-    const entryByName = new Map<string, CbzZipEntry>();
-    for (const entry of index.entries) {
-      entryByName.set(normalizeEntryName(entry.name), entry);
-    }
-
-    const inpEntries = index.entries.filter((entry) => /\.inp$/i.test(entry.name));
-    const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-'));
-    const languages = new Set<string>();
-    const books: InpxBookRecord[] = [];
-    const failedIndexEntries: string[] = [];
-    const counts = {
-      totalIndexedBooks: 0,
-      skippedDel: 0,
-      skippedNoFile: 0,
-      skippedEmptyTitle: 0,
-      skippedUnsupported: 0,
-    };
-
+    const container = await openInpxContainer(archivePath);
     try {
-      for (const [indexInArchive, inp] of inpEntries.entries()) {
-        try {
-          const parsed = await this.parseInpEntry(
-            indexInArchive,
-            inp.name,
-            () => this.readEntryOrThrow(archivePath, inp, inp.name),
-            tempDir,
-            entryByName,
-            languages,
-            counts,
-          );
-          books.push(...parsed);
-        } catch {
-          // A single bad index must not sink the whole archive: other languages/producers may be
-          // readable, and the failure names are surfaced in the result for the caller to log.
-          failedIndexEntries.push(inp.name);
-        }
+      const entries = container.entries;
+      if (entries.length > MAX_ARCHIVE_ENTRIES) {
+        throw new Error(`INPX archive has too many entries: ${entries.length}`);
       }
+
+      const entryNames = new Set(entries.map((entry) => entry.name));
+      const inpEntries = entries.filter((entry) => /\.inp$/i.test(entry.name));
+      const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-'));
+      const languages = new Set<string>();
+      const books: InpxBookRecord[] = [];
+      const failedIndexEntries: string[] = [];
+      const counts = {
+        totalIndexedBooks: 0,
+        skippedDel: 0,
+        skippedNoFile: 0,
+        skippedEmptyTitle: 0,
+        skippedUnsupported: 0,
+      };
+
+      try {
+        for (const [index, inp] of inpEntries.entries()) {
+          try {
+            const buffer = await container.readEntry(inp.name);
+            if (!buffer) {
+              throw new Error(`INPX entry ${inp.name} could not be read`);
+            }
+            const parsed = await this.parseInpEntry(index, inp.name, buffer, tempDir, entryNames, languages, counts);
+            books.push(...parsed);
+          } catch {
+            // A single bad index must not sink the whole archive: other languages/producers may be
+            // readable, and the failure names are surfaced in the result for the caller to log.
+            failedIndexEntries.push(inp.name);
+          }
+        }
+      } finally {
+        await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+
+      if (books.length === 0 && failedIndexEntries.length > 0) {
+        const detail = failedIndexEntries.slice(0, 5).join(', ');
+        const extra = failedIndexEntries.length > 5 ? ` and ${failedIndexEntries.length - 5} more` : '';
+        throw new Error(`INPX archive has no readable index (failed: ${detail}${extra})`);
+      }
+
+      return { books, languages: [...languages], failedIndexEntries, ...counts };
     } finally {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      await container.close();
     }
-
-    if (books.length === 0 && failedIndexEntries.length > 0) {
-      const detail = failedIndexEntries.slice(0, 5).join(', ');
-      const extra = failedIndexEntries.length > 5 ? ` and ${failedIndexEntries.length - 5} more` : '';
-      throw new Error(`INPX archive has no readable index (failed: ${detail}${extra})`);
-    }
-
-    return { books, languages: [...languages], failedIndexEntries, ...counts };
-  }
-
-  private async readEntryOrThrow(archivePath: string, entry: CbzZipEntry, entryName: string): Promise<Buffer> {
-    const buffer = await extractCbzZipEntry(archivePath, entry);
-    if (buffer === null) {
-      throw new Error(`INPX entry ${entryName} uses unsupported ZIP compression method ${entry.compression}`);
-    }
-    return buffer;
   }
 
   private async parseInpEntry(
     index: number,
     entryName: string,
-    entryBuffer: () => Promise<Buffer>,
+    buffer: Buffer,
     tempDir: string,
-    entryByName: Map<string, CbzZipEntry>,
+    entryNames: Set<string>,
     languages: Set<string>,
     counts: {
       totalIndexedBooks: number;
@@ -173,7 +159,6 @@ export class InpxParser {
       skippedUnsupported: number;
     },
   ): Promise<InpxBookRecord[]> {
-    const buffer = await entryBuffer();
     if (buffer.length > MAX_INP_BYTES) {
       throw new Error(`INPX index entry ${entryName} is too large`);
     }
@@ -192,7 +177,7 @@ export class InpxParser {
       db.enableDefensive?.(true);
 
       const authors = this.readAuthors(db);
-      const books = this.readBooks(db, entryByName, languages, counts);
+      const books = this.readBooks(db, entryNames, languages, counts);
       return this.resolveAuthors(books, authors);
     } finally {
       db.close();
@@ -224,7 +209,7 @@ export class InpxParser {
 
   private readBooks(
     db: DatabaseSync,
-    entryByName: Map<string, CbzZipEntry>,
+    entryNames: Set<string>,
     languages: Set<string>,
     counts: {
       totalIndexedBooks: number;
@@ -253,7 +238,7 @@ export class InpxParser {
         continue;
       }
       const file = toNullableString(row.file);
-      if (!file || !entryByName.has(normalizeEntryName(file))) {
+      if (!file || !entryNames.has(normalizeEntryName(file))) {
         counts.skippedNoFile += 1;
         continue;
       }
@@ -351,9 +336,8 @@ function splitCsv(value: string | null): string[] {
     .filter(Boolean);
 }
 
-export function normalizeEntryName(name: string): string {
-  return name.replace(/\\/g, '/').replace(/^\/+/, '');
-}
+/** Re-exported so existing callers keep one import site; the canonical definition lives in the container. */
+export { normalizeEntryName } from '../../common/inpx-container';
 
 function toNullableString(value: unknown): string | null {
   if (value === null || value === undefined) return null;

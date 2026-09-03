@@ -14,7 +14,7 @@ import { access, readdir, rm, stat, rename } from 'fs/promises';
 import { inArray, type SQL } from 'drizzle-orm';
 
 import { bookCoverDirPath, bookThumbnailPath, findPreferredBookCoverFileName } from '../../common/book-cover-storage';
-import { readCbzZipIndex, type CbzZipEntry } from '../../common/cbz-zip-reader';
+import { getCachedInpxContainer, type InpxContainer } from '../../common/inpx-container';
 import { MAX_BOOK_QUERY_OFFSET_ROWS, isBookQueryOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { resolveIsAudiobook } from '../../common/utils/book-media.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -176,7 +176,7 @@ export type ExportPlan = {
     absolutePath: string;
     zipPath: string;
     sizeBytes: number;
-    archive?: { archivePath: string; entry: CbzZipEntry };
+    archive?: { container: InpxContainer; entryName: string };
   }[];
   projectedBytes: number;
   bookCount: number;
@@ -1426,7 +1426,7 @@ export class BookService {
     format: string;
     bookId: number;
     originalFilename: string;
-    archive?: { archivePath: string; entry: CbzZipEntry };
+    archive?: { container: InpxContainer; entryName: string };
   }> {
     const file = await this.verifyFileAccess(fileId, user);
     if (file.storageKind === 'inpx') {
@@ -1457,47 +1457,40 @@ export class BookService {
     format: string;
     bookId: number;
     originalFilename: string;
-    archive: { archivePath: string; entry: CbzZipEntry };
+    archive: { container: InpxContainer; entryName: string };
   }> {
     if (file.inpxArchiveId == null || !file.archiveEntryPath) {
       throw new NotFoundException(`File ${file.bookId} has no archive source`);
     }
     const archivePath = await this.bookRepo.findInpxArchiveAbsolutePath(file.inpxArchiveId);
     if (!archivePath) throw new NotFoundException(`INPX archive ${file.inpxArchiveId} not found on disk`);
-    const index = await readCbzZipIndex(archivePath);
-    if (!index) throw new NotFoundException('INPX archive could not be read');
-    const entry = index.entries.find((candidate) => normalizeArchiveEntryName(candidate.name) === file.archiveEntryPath);
+    const container = await getCachedInpxContainer(archivePath);
+    const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
     if (!entry) throw new NotFoundException(`File ${file.bookId} not found in archive`);
     const originalFilename = basename(file.archiveEntryPath);
     return {
       path: file.absolutePath,
-      size: entry.uncompressedSize,
+      size: entry.size,
       format: file.format ?? 'unknown',
       bookId: file.bookId,
       originalFilename,
-      archive: { archivePath, entry },
+      archive: { container, entryName: entry.name },
     };
   }
 
-  private async resolveInpxExportEntry(
-    file: { inpxArchiveId?: number | null; archiveEntryPath?: string | null },
-    indexCache: Map<number, CbzZipEntry[]>,
-  ): Promise<{ archivePath: string; entry: CbzZipEntry }> {
+  private async resolveInpxExportEntry(file: {
+    inpxArchiveId?: number | null;
+    archiveEntryPath?: string | null;
+  }): Promise<{ container: InpxContainer; entryName: string; size: number }> {
     if (file.inpxArchiveId == null || !file.archiveEntryPath) {
       throw new NotFoundException('File has no archive source');
     }
     const archivePath = await this.bookRepo.findInpxArchiveAbsolutePath(file.inpxArchiveId);
     if (!archivePath) throw new NotFoundException(`INPX archive ${file.inpxArchiveId} not found on disk`);
-    let entries = indexCache.get(file.inpxArchiveId);
-    if (!entries) {
-      const index = await readCbzZipIndex(archivePath);
-      if (!index) throw new NotFoundException('INPX archive could not be read');
-      entries = index.entries;
-      indexCache.set(file.inpxArchiveId, entries);
-    }
-    const entry = entries.find((candidate) => normalizeArchiveEntryName(candidate.name) === file.archiveEntryPath);
-    if (!entry) throw new NotFoundException(`File not found in archive`);
-    return { archivePath, entry };
+    const container = await getCachedInpxContainer(archivePath);
+    const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
+    if (!entry) throw new NotFoundException('File not found in archive');
+    return { container, entryName: entry.name, size: entry.size };
   }
 
   async resolveDownloadFilename(file: { bookId: number; absolutePath: string; format: string | null }): Promise<string> {
@@ -3058,15 +3051,15 @@ export class BookService {
       const archiveFilename = this.resolveExportArchiveFilename(uniqueBookIds.length, orderedFiles, metadataByBookId, pattern);
       const usedPaths = new Set<string>();
       let projectedBytes = 0;
-      const archiveIndexCache = new Map<number, CbzZipEntry[]>();
 
       const result: ExportPlan['files'] = [];
       for (const file of orderedFiles) {
         let sizeBytes = await this.resolveExportFileSize(file);
-        let archiveEntry: { archivePath: string; entry: CbzZipEntry } | undefined;
+        let archiveEntry: { container: InpxContainer; entryName: string } | undefined;
         if (file.storageKind === 'inpx') {
-          archiveEntry = await this.resolveInpxExportEntry(file, archiveIndexCache);
-          sizeBytes = archiveEntry.entry.uncompressedSize;
+          const resolved = await this.resolveInpxExportEntry(file);
+          archiveEntry = { container: resolved.container, entryName: resolved.entryName };
+          sizeBytes = resolved.size;
         }
         projectedBytes += sizeBytes;
         if (projectedBytes > EXPORT_LIMITS.MAX_PROJECTED_BYTES) {
@@ -3475,8 +3468,4 @@ export class BookService {
     }
     return chapters;
   }
-}
-
-function normalizeArchiveEntryName(name: string): string {
-  return name.replace(/\\/g, '/').replace(/^\/+/, '');
 }

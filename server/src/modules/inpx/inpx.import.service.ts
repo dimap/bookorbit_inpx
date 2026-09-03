@@ -3,12 +3,12 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
-import { extractCbzZipEntry, readCbzZipIndex } from '../../common/cbz-zip-reader';
+import { openInpxContainer } from '../../common/inpx-container';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
 import { InpxProgressStore } from './inpx-progress.store';
-import { InpxParser, normalizeEntryName } from './inpx.parser';
+import { InpxParser } from './inpx.parser';
 import { INPX_BOOKS_CHUNK_SIZE, InpxRepository } from './inpx.repository';
 
 const ENRICH_CONCURRENCY = 4;
@@ -147,12 +147,7 @@ export class InpxImportService {
     onProgress: (processed: number) => void,
   ): Promise<number> {
     const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-enrich-'));
-    const zipIndex = await readCbzZipIndex(archivePath);
-    if (!zipIndex) {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-      throw new Error('INPX archive could not be read');
-    }
-    const byName = new Map(zipIndex.entries.map((file) => [normalizeEntryName(file.name), file]));
+    const container = await openInpxContainer(archivePath);
     let nextIndex = 0;
     let enriched = 0;
     let failed = 0;
@@ -163,14 +158,7 @@ export class InpxImportService {
         nextIndex += 1;
         const startedAt = Date.now();
         try {
-          const zipEntry = byName.get(normalizeEntryName(entry.entryPath));
-          if (!zipEntry) {
-            this.logger.warn(
-              `[inpx.enrich] [fail] bookId=${entry.bookId} errorClass=MissingEntry error="entry not found in archive" - enrichment skipped`,
-            );
-            continue;
-          }
-          const buffer = await extractCbzZipEntry(archivePath, zipEntry);
+          const buffer = await container.readEntry(entry.entryPath);
           if (!buffer || buffer.length === 0) continue;
           const tempPath = join(tempDir, `book-${entry.bookId}.fb2`);
           await writeFile(tempPath, buffer);
@@ -196,6 +184,7 @@ export class InpxImportService {
       await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
     } finally {
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      await container.close();
     }
 
     if (failed > 0) {
