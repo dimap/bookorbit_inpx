@@ -1470,6 +1470,7 @@ export class BookRepository {
         storageKind: bookFiles.storageKind,
         archiveEntryPath: bookFiles.archiveEntryPath,
         inpxArchiveId: bookFiles.inpxArchiveId,
+        sourceArchivePath: bookFiles.sourceArchivePath,
       })
       .from(bookFiles)
       .innerJoin(books, eq(books.id, bookFiles.bookId))

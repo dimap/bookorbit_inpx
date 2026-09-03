@@ -1451,6 +1451,7 @@ export class BookService {
     bookId: number;
     archiveEntryPath: string | null;
     inpxArchiveId: number | null;
+    sourceArchivePath: string | null;
   }): Promise<{
     path: string;
     size: number;
@@ -1459,11 +1460,10 @@ export class BookService {
     originalFilename: string;
     archive: { container: InpxContainer; entryName: string };
   }> {
-    if (file.inpxArchiveId == null || !file.archiveEntryPath) {
+    if (!file.archiveEntryPath) {
       throw new NotFoundException(`File ${file.bookId} has no archive source`);
     }
-    const archivePath = await this.bookRepo.findInpxArchiveAbsolutePath(file.inpxArchiveId);
-    if (!archivePath) throw new NotFoundException(`INPX archive ${file.inpxArchiveId} not found on disk`);
+    const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId));
     const container = await getCachedInpxContainer(archivePath);
     const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
     if (!entry) throw new NotFoundException(`File ${file.bookId} not found in archive`);
@@ -1478,15 +1478,24 @@ export class BookService {
     };
   }
 
+  private async resolveInpxArchivePath(inpxArchiveId: number | null): Promise<string> {
+    if (inpxArchiveId == null) {
+      throw new NotFoundException('File has no archive source');
+    }
+    const archivePath = await this.bookRepo.findInpxArchiveAbsolutePath(inpxArchiveId);
+    if (!archivePath) throw new NotFoundException(`INPX archive ${inpxArchiveId} not found on disk`);
+    return archivePath;
+  }
+
   private async resolveInpxExportEntry(file: {
     inpxArchiveId?: number | null;
     archiveEntryPath?: string | null;
+    sourceArchivePath?: string | null;
   }): Promise<{ container: InpxContainer; entryName: string; size: number }> {
-    if (file.inpxArchiveId == null || !file.archiveEntryPath) {
+    if (!file.archiveEntryPath) {
       throw new NotFoundException('File has no archive source');
     }
-    const archivePath = await this.bookRepo.findInpxArchiveAbsolutePath(file.inpxArchiveId);
-    if (!archivePath) throw new NotFoundException(`INPX archive ${file.inpxArchiveId} not found on disk`);
+    const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId ?? null));
     const container = await getCachedInpxContainer(archivePath);
     const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
     if (!entry) throw new NotFoundException('File not found in archive');

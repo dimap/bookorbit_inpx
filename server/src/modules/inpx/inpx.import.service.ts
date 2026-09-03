@@ -1,18 +1,22 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
 import { openInpxContainer } from '../../common/inpx-container';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
 import { InpxProgressStore } from './inpx-progress.store';
+import type { InpxBookRecord } from './inpx.parser';
 import { InpxParser } from './inpx.parser';
 import { INPX_BOOKS_CHUNK_SIZE, InpxRepository } from './inpx.repository';
 
 const ENRICH_CONCURRENCY = 4;
 const PROGRESS_EMIT_EVERY = 10;
+
+/** Companion archives whose entry layout has already been logged this process run. */
+const inspectedArchives = new Set<number>();
 
 @Injectable()
 export class InpxImportService {
@@ -95,13 +99,25 @@ export class InpxImportService {
           `[${event}] [end] archiveId=${archiveId} phase=parse failedIndexes=${parsed.failedIndexEntries.length} reasons="${sanitizeLogValue(reasons)}"${extra ? ` (${extra})` : ''} - some INPX index entries were unreadable and skipped`,
         );
       }
-      await this.repo.updateArchive(archiveId, { totalBooks: parsed.books.length });
-      progress.total = parsed.books.length;
+
+      const { books, companionPaths, missingShards } = await this.resolveCompanionSources(parsed.books, archive.absolutePath);
+      if (missingShards > 0) {
+        this.logger.warn(
+          `[${event}] [end] archiveId=${archiveId} phase=parse missingCompanionArchives=${missingShards} - books from shards without a companion archive were skipped`,
+        );
+      }
+      if (companionPaths.length > 0 && !inspectedArchives.has(archiveId)) {
+        inspectedArchives.add(archiveId);
+        await this.logCompanionSample(archiveId, companionPaths[0]!);
+      }
+
+      await this.repo.updateArchive(archiveId, { totalBooks: books.length });
+      progress.total = books.length;
       this.progressStore.set(progress);
 
-      const bookEntries: { bookId: number; entryPath: string }[] = [];
+      const bookEntries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[] = [];
       let imported = 0;
-      for (const chunk of chunkArray(parsed.books, INPX_BOOKS_CHUNK_SIZE)) {
+      for (const chunk of chunkArray(books, INPX_BOOKS_CHUNK_SIZE)) {
         const chunkResult = await this.repo.importBooksChunked(libraryId, folderId, archiveId, chunk);
         imported += chunkResult.imported;
         bookEntries.push(...chunkResult.bookEntries);
@@ -111,7 +127,7 @@ export class InpxImportService {
       }
       await this.repo.updateArchive(archiveId, { importedBooks: imported });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} phase=index durationMs=${Date.now() - startedAt} totalBooks=${parsed.books.length} imported=${imported} skipped=${parsed.books.length - imported} - index phase completed`,
+        `[${event}] [end] archiveId=${archiveId} phase=index durationMs=${Date.now() - startedAt} totalBooks=${books.length} imported=${imported} skipped=${books.length - imported} missingCompanionArchives=${missingShards} - index phase completed`,
       );
 
       progress.phase = 'enrich';
@@ -148,11 +164,105 @@ export class InpxImportService {
   }
 
   /**
-   * Extracts each FB2 from the archive to a temp file and lets the standard metadata pipeline fill
+   * Resolves each indexed book to the archive that physically holds it. Text-format shards live
+   * in a companion archive with the same base name next to the INPX (`d.fb2-*.inp` pairs with
+   * `d.fb2-*.7z`); books whose companion archive is missing are dropped.
+   */
+  private async resolveCompanionSources(
+    books: InpxBookRecord[],
+    inpxPath: string,
+  ): Promise<{ books: InpxBookRecord[]; companionPaths: string[]; missingShards: number }> {
+    const directory = dirname(inpxPath);
+    const cache = new Map<string, string | null>();
+    const companionPaths = new Set<string>();
+    let missingShards = 0;
+    const resolved: InpxBookRecord[] = [];
+
+    for (const book of books) {
+      if (!book.sourceArchiveName) {
+        resolved.push(book);
+        continue;
+      }
+      let path = cache.get(book.sourceArchiveName);
+      if (path === undefined) {
+        path = await this.findCompanionArchive(directory, book.sourceArchiveName);
+        if (path) companionPaths.add(path);
+        else missingShards += 1;
+        cache.set(book.sourceArchiveName, path);
+      }
+      if (!path) continue;
+      resolved.push({ ...book, sourceArchivePath: path });
+    }
+
+    return { books: resolved, companionPaths: [...companionPaths], missingShards };
+  }
+
+  private async findCompanionArchive(directory: string, shardName: string): Promise<string | null> {
+    const base = shardName.replace(/\.inp$/i, '');
+    for (const ext of ['7z', 'zip']) {
+      const candidate = join(directory, `${base}.${ext}`);
+      try {
+        const fileStat = await stat(candidate);
+        if (fileStat.isFile()) return candidate;
+      } catch {
+        // not present; try the next container
+      }
+    }
+    return null;
+  }
+
+  private async logCompanionSample(archiveId: number, archivePath: string): Promise<void> {
+    const event = 'inpx.import';
+    try {
+      const container = await openInpxContainer(archivePath);
+      const names = container.entries.slice(0, 5).map((entry) => entry.name);
+      this.logger.log(
+        `[${event}] [end] archiveId=${archiveId} phase=parse companion="${sanitizeLogValue(archivePath)}" entries=${container.entries.length} sample="${sanitizeLogValue(names.join(', '))}" - companion archive layout`,
+      );
+      await container.close();
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      const errorMessage = sanitizeLogValue(error.message);
+      this.logger.warn(
+        `[${event}] [fail] archiveId=${archiveId} phase=parse errorClass=${error.name} error="${errorMessage}" - companion archive could not be opened`,
+      );
+    }
+  }
+
+  /**
+   * Extracts each FB2 from its archive to a temp file and lets the standard metadata pipeline fill
    * description, ISBN, dates, cover and author sort names. Runs with bounded concurrency; one bad
-   * file is logged and skipped, never fatal.
+   * file is logged and skipped, never fatal. Entries are grouped by their source archive so each
+   * companion 7z is opened and closed once.
    */
   private async enrichEntries(
+    inpxPath: string,
+    entries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[],
+    onProgress: (processed: number) => void,
+  ): Promise<number> {
+    const groups = new Map<string, { bookId: number; entryPath: string }[]>();
+    for (const entry of entries) {
+      const key = entry.sourceArchivePath ?? inpxPath;
+      let list = groups.get(key);
+      if (!list) {
+        list = [];
+        groups.set(key, list);
+      }
+      list.push({ bookId: entry.bookId, entryPath: entry.entryPath });
+    }
+
+    let enriched = 0;
+    let runningTotal = 0;
+    for (const [archivePath, groupEntries] of groups) {
+      enriched += await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
+        onProgress(runningTotal + localProcessed);
+      });
+      runningTotal += groupEntries.length;
+    }
+    return enriched;
+  }
+
+  private async enrichFromContainer(
     archivePath: string,
     entries: { bookId: number; entryPath: string }[],
     onProgress: (processed: number) => void,
@@ -199,7 +309,9 @@ export class InpxImportService {
     }
 
     if (failed > 0) {
-      this.logger.warn(`[inpx.enrich] [end] enriched=${enriched} failed=${failed} - enrichment completed with failures`);
+      this.logger.warn(
+        `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failed} - enrichment completed with failures`,
+      );
     }
     return enriched;
   }

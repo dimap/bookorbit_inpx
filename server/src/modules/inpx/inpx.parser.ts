@@ -47,6 +47,12 @@ export interface InpxBookRecord {
   seriesIndex: string | null;
   language: string | null;
   publishedYear: number | null;
+  /** Per-book identifier used to derive the FB2 entry name (`fb2-<id>.fb2`). */
+  fileId: string | null;
+  /** The `.inp` shard this record came from; its base name maps to a companion `.7z` archive. */
+  sourceArchiveName: string | null;
+  /** Resolved by the importer: companion archive that holds the FB2 entry (null = inside the INPX). */
+  sourceArchivePath: string | null;
 }
 
 export interface InpxParseResult {
@@ -110,7 +116,9 @@ export class InpxParser {
       }
 
       const entryNames = new Set(entries.map((entry) => entry.name));
-      const inpEntries = entries.filter((entry) => /\.inp$/i.test(entry.name));
+      // The catalog ships `fb2` shards (books) next to `usr` shards (users); only the former parse
+      // as books.
+      const inpEntries = entries.filter((entry) => /\.inp$/i.test(entry.name) && !/usr/i.test(entry.name));
       const fb2EntryCount = entries.filter((entry) => /\.fb2(\.zip)?$/i.test(entry.name)).length;
       const sampleBookEntries = entries
         .filter((entry) => !/\.inp$/i.test(entry.name))
@@ -230,7 +238,7 @@ export class InpxParser {
       return this.parseSqliteInp(index, entryName, buffer, tempDir, entryNames, languages, counts);
     }
     if (looksLikeTextInp(buffer)) {
-      return this.parseTextInp(buffer, entryNames, languages, counts);
+      return this.parseTextInp(entryName, buffer, languages, counts);
     }
     // Not every `.inp` in the wild is a recognized index; skip rather than fail the archive, but
     // record the name, signature and a text preview so the caller can tell the user which entries
@@ -284,8 +292,8 @@ export class InpxParser {
    *   size, language, rating, ?, year, libraryName
    */
   private parseTextInp(
+    shardName: string,
     buffer: Buffer,
-    entryNames: Set<string>,
     languages: Set<string>,
     counts: {
       totalIndexedBooks: number;
@@ -316,8 +324,8 @@ export class InpxParser {
         counts.skippedUnsupported += 1;
         continue;
       }
-      const file = resolveTextEntryFile(fields[6] ?? '', ext, entryNames);
-      if (!file) {
+      const fileId = (fields[6] ?? '').trim();
+      if (!fileId) {
         counts.skippedNoFile += 1;
         continue;
       }
@@ -327,7 +335,7 @@ export class InpxParser {
       counts.totalIndexedBooks += 1;
 
       records.push({
-        file,
+        file: `fb2-${fileId}.${ext === 'fb2.zip' ? 'zip' : ext}`,
         format: ext === 'fb2.zip' ? 'fb2' : ext,
         sizeBytes: null,
         title,
@@ -337,6 +345,9 @@ export class InpxParser {
         seriesIndex: (fields[4] ?? '').trim() || null,
         language,
         publishedYear: toNullableNumber(fields[15]),
+        fileId,
+        sourceArchiveName: shardName,
+        sourceArchivePath: null,
       });
     }
     return records;
@@ -446,6 +457,9 @@ export class InpxParser {
         seriesIndex: row.seqnumber != null ? String(row.seqnumber) : null,
         language: row.booklang || null,
         publishedYear: null,
+        fileId: row.file ?? null,
+        sourceArchiveName: null,
+        sourceArchivePath: null,
       };
     });
   }
@@ -515,26 +529,6 @@ function parseTextAuthors(raw: string): string[] {
     }
   }
   return names;
-}
-
-/**
- * Maps a text-format record to the FB2 file inside the archive. The file id is the record's
- * per-book identifier; the archive stores files under one of a few well-known layouts, so the first
- * layout present in the archive wins.
- */
-function resolveTextEntryFile(fileId: string, ext: string, entryNames: Set<string>): string | null {
-  if (!fileId) return null;
-  const candidates = [
-    `fb2-${fileId}.${ext}`,
-    `${fileId}.${ext}`,
-    `fb2/${fileId}.${ext}`,
-    `fb2/${fileId.slice(0, 1)}/${fileId}.${ext}`,
-    `fb2/${fileId.slice(0, 2)}/${fileId}.${ext}`,
-  ];
-  for (const candidate of candidates) {
-    if (entryNames.has(candidate)) return candidate;
-  }
-  return null;
 }
 
 function splitCsv(value: string | null): string[] {

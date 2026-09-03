@@ -1,0 +1,3 @@
+ALTER TABLE "book_files" DROP CONSTRAINT "book_files_inpx_entry_chk";--> statement-breakpoint
+ALTER TABLE "book_files" ADD COLUMN "source_archive_path" varchar(4096);--> statement-breakpoint
+ALTER TABLE "book_files" ADD CONSTRAINT "book_files_inpx_entry_chk" CHECK (("book_files"."storage_kind" <> 'inpx') or ("book_files"."archive_entry_path" is not null and ("book_files"."inpx_archive_id" is not null or "book_files"."source_archive_path" is not null)));

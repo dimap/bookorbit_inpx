@@ -87,11 +87,14 @@ export const bookFiles = pgTable(
     durationSeconds: integer('duration_seconds'),
     // null means "not determined yet"; rows predating this column are backfilled lazily on Kobo sync.
     isFixedLayout: boolean('is_fixed_layout'),
-    // 'filesystem' rows point at a real path; 'inpx' rows live inside an INPX archive and resolve
-    // their bytes through `inpxArchiveId` + `archiveEntryPath`.
+    // 'filesystem' rows point at a real path; 'inpx' rows live inside an archive and resolve their
+    // bytes through `sourceArchivePath` (or the INPX archive when null) + `archiveEntryPath`.
     storageKind: varchar('storage_kind', { length: 20 }).notNull().default('filesystem'),
     archiveEntryPath: varchar('archive_entry_path', { length: 4096 }),
     inpxArchiveId: integer('inpx_archive_id').references(() => inpxArchives.id, { onDelete: 'cascade' }),
+    // Companion archive (e.g. a Flibusta fb2-*.7z shard) that physically holds the entry. Null when
+    // the file lives inside the INPX archive itself.
+    sourceArchivePath: varchar('source_archive_path', { length: 4096 }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
@@ -117,7 +120,10 @@ export const bookFiles = pgTable(
       .onDelete('cascade'),
     check('book_files_role_chk', sql`${t.role} in ('content', 'cover', 'metadata', 'supplement')`),
     check('book_files_storage_kind_chk', sql`${t.storageKind} in ('filesystem', 'inpx')`),
-    check('book_files_inpx_entry_chk', sql`(${t.storageKind} <> 'inpx') or (${t.archiveEntryPath} is not null and ${t.inpxArchiveId} is not null)`),
+    check(
+      'book_files_inpx_entry_chk',
+      sql`(${t.storageKind} <> 'inpx') or (${t.archiveEntryPath} is not null and (${t.inpxArchiveId} is not null or ${t.sourceArchivePath} is not null))`,
+    ),
     check('book_files_size_bytes_nonnegative_chk', sql`${t.sizeBytes} is null or ${t.sizeBytes} >= 0`),
     check('book_files_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} is null or ${t.durationSeconds} >= 0`),
   ],

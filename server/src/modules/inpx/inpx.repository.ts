@@ -28,7 +28,7 @@ export interface InpxImportChunkResult {
   imported: number;
   skipped: number;
   createdBookIds: number[];
-  bookEntries: { bookId: number; entryPath: string }[];
+  bookEntries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[];
 }
 
 @Injectable()
@@ -168,6 +168,7 @@ export class InpxRepository {
           storageKind: 'inpx',
           archiveEntryPath: normalizedEntry,
           inpxArchiveId: archiveId,
+          sourceArchivePath: record.sourceArchivePath,
         })
         .returning({ id: bookFiles.id });
 
@@ -198,7 +199,7 @@ export class InpxRepository {
 
       result.imported += 1;
       result.createdBookIds.push(bookRow.id);
-      result.bookEntries.push({ bookId: bookRow.id, entryPath: normalizedEntry });
+      result.bookEntries.push({ bookId: bookRow.id, entryPath: normalizedEntry, sourceArchivePath: record.sourceArchivePath });
     }
 
     return result;
