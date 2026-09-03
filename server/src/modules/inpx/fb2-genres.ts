@@ -12,6 +12,7 @@ export const FB2_GENRE_NAMES: Readonly<Record<string, string>> = {
   sf_detective: 'Detective Science Fiction',
   sf_cyberpunk: 'Cyberpunk',
   sf_parapolit: 'Political Science Fiction',
+  sf_social: 'Social Science Fiction',
   sf_postapoc: 'Post-apocalyptic',
   sf_teens: 'Teen Science Fiction',
   sf_space: 'Space Opera',

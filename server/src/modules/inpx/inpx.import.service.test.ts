@@ -68,10 +68,15 @@ describe('InpxImportService', () => {
     });
     parser.parse.mockResolvedValue({
       books: [
-        { file: 'r/rus00001.fb2', format: 'fb2', title: 'One' },
-        { file: 'r/rus00002.fb2', format: 'fb2', title: 'Two' },
+        { file: 'r/rus00001.fb2', format: 'fb2', title: 'One', publishedYear: null },
+        { file: 'r/rus00002.fb2', format: 'fb2', title: 'Two', publishedYear: null },
       ],
       languages: ['ru'],
+      containerKind: 'zip',
+      totalEntries: 2,
+      inpEntryCount: 0,
+      fb2EntryCount: 2,
+      sampleBookEntries: ['r/rus00001.fb2'],
       totalIndexedBooks: 2,
       skippedDel: 0,
       skippedNoFile: 0,

@@ -46,11 +46,17 @@ export interface InpxBookRecord {
   seriesName: string | null;
   seriesIndex: string | null;
   language: string | null;
+  publishedYear: number | null;
 }
 
 export interface InpxParseResult {
   books: InpxBookRecord[];
   languages: string[];
+  containerKind: 'zip' | '7z';
+  totalEntries: number;
+  inpEntryCount: number;
+  fb2EntryCount: number;
+  sampleBookEntries: string[];
   totalIndexedBooks: number;
   skippedDel: number;
   skippedNoFile: number;
@@ -103,6 +109,11 @@ export class InpxParser {
 
       const entryNames = new Set(entries.map((entry) => entry.name));
       const inpEntries = entries.filter((entry) => /\.inp$/i.test(entry.name));
+      const fb2EntryCount = entries.filter((entry) => /\.fb2(\.zip)?$/i.test(entry.name)).length;
+      const sampleBookEntries = entries
+        .filter((entry) => !/\.inp$/i.test(entry.name))
+        .slice(0, 5)
+        .map((entry) => entry.name);
       const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-'));
       const languages = new Set<string>();
       const books: InpxBookRecord[] = [];
@@ -154,7 +165,18 @@ export class InpxParser {
         throw new Error(`INPX archive has no readable index (failed: ${samples}${extra})`);
       }
 
-      return { books, languages: [...languages], failedIndexEntries, indexFailureReasons, ...counts };
+      return {
+        books,
+        languages: [...languages],
+        containerKind: container.kind,
+        totalEntries: entries.length,
+        inpEntryCount: inpEntries.length,
+        fb2EntryCount,
+        sampleBookEntries,
+        failedIndexEntries,
+        indexFailureReasons,
+        ...counts,
+      };
     } finally {
       await container.close();
     }
@@ -194,21 +216,41 @@ export class InpxParser {
     if (buffer.length > MAX_INP_BYTES) {
       throw new Error(`INPX index entry ${entryName} is too large`);
     }
-    if (!isSqliteBuffer(buffer)) {
-      // Not every `.inp` in the wild is a SQLite database; skip rather than fail the archive, but
-      // record the name, signature and a text preview so the caller can tell the user which entries
-      // were ignored and what they actually are.
-      const signature = [...buffer.subarray(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
-      const rawPreview = buffer.subarray(0, 120).toString('utf8');
-      let preview = '';
-      for (const char of rawPreview) {
-        const code = char.charCodeAt(0);
-        preview += code < 32 && code !== 9 && code !== 10 && code !== 13 ? '.' : char;
-      }
-      preview = preview.replace(/\s+/g, ' ').trim();
-      throw new Error(`${entryName} is not a SQLite database (${buffer.length} bytes, signature "${signature}", text "${preview}")`);
+    if (isSqliteBuffer(buffer)) {
+      return this.parseSqliteInp(index, entryName, buffer, tempDir, entryNames, languages, counts);
     }
+    if (looksLikeTextInp(buffer)) {
+      return this.parseTextInp(buffer, entryNames, languages, counts);
+    }
+    // Not every `.inp` in the wild is a recognized index; skip rather than fail the archive, but
+    // record the name, signature and a text preview so the caller can tell the user which entries
+    // were ignored and what they actually are.
+    const signature = [...buffer.subarray(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
+    const rawPreview = buffer.subarray(0, 120).toString('utf8');
+    let preview = '';
+    for (const char of rawPreview) {
+      const code = char.charCodeAt(0);
+      preview += code < 32 && code !== 9 && code !== 10 && code !== 13 ? '.' : char;
+    }
+    preview = preview.replace(/\s+/g, ' ').trim();
+    throw new Error(`${entryName} is not a readable index (${buffer.length} bytes, signature "${signature}", text "${preview}")`);
+  }
 
+  private async parseSqliteInp(
+    index: number,
+    entryName: string,
+    buffer: Buffer,
+    tempDir: string,
+    entryNames: Set<string>,
+    languages: Set<string>,
+    counts: {
+      totalIndexedBooks: number;
+      skippedDel: number;
+      skippedNoFile: number;
+      skippedEmptyTitle: number;
+      skippedUnsupported: number;
+    },
+  ): Promise<InpxBookRecord[]> {
     const dbPath = join(tempDir, `idx-${index}.sqlite`);
     await writeFile(dbPath, buffer);
 
@@ -223,6 +265,71 @@ export class InpxParser {
     } finally {
       db.close();
     }
+  }
+
+  /**
+   * Flibusta's text catalog format: records split by CRLF, fields split by 0x04. Field order
+   * (from the classic `lib.rus.ec`/Flibusta dump):
+   *   authors, genres, title, series, seriesNumber, libid, fileid, bookid, del, ext, date,
+   *   size, language, rating, ?, year, libraryName
+   */
+  private parseTextInp(
+    buffer: Buffer,
+    entryNames: Set<string>,
+    languages: Set<string>,
+    counts: {
+      totalIndexedBooks: number;
+      skippedDel: number;
+      skippedNoFile: number;
+      skippedEmptyTitle: number;
+      skippedUnsupported: number;
+    },
+  ): InpxBookRecord[] {
+    const records: InpxBookRecord[] = [];
+    const text = buffer.toString('utf8');
+    for (const line of text.split(/\r\n|\r|\n/)) {
+      if (line.length === 0) continue;
+      const fields = line.split('\x04');
+      if (fields.length < 8) continue;
+
+      if (fields[8] === '1') {
+        counts.skippedDel += 1;
+        continue;
+      }
+      const title = (fields[2] ?? '').trim();
+      if (!title) {
+        counts.skippedEmptyTitle += 1;
+        continue;
+      }
+      const ext = (fields[9] ?? '').toLowerCase();
+      if (!SUPPORTED_BOOK_EXTENSIONS.has(ext)) {
+        counts.skippedUnsupported += 1;
+        continue;
+      }
+      const file = resolveTextEntryFile(fields[6] ?? '', ext, entryNames);
+      if (!file) {
+        counts.skippedNoFile += 1;
+        continue;
+      }
+
+      const language = (fields[12] ?? '').trim() || null;
+      if (language) languages.add(language);
+      counts.totalIndexedBooks += 1;
+
+      records.push({
+        file,
+        format: ext === 'fb2.zip' ? 'fb2' : ext,
+        sizeBytes: null,
+        title,
+        authors: parseTextAuthors(fields[0] ?? ''),
+        genres: this.resolveGenres(fields[1] ?? ''),
+        seriesName: (fields[3] ?? '').trim() || null,
+        seriesIndex: (fields[4] ?? '').trim() || null,
+        language,
+        publishedYear: toNullableNumber(fields[15]),
+      });
+    }
+    return records;
   }
 
   private readAuthors(db: DatabaseSync): Map<number, InpxAuthorRow> {
@@ -328,6 +435,7 @@ export class InpxParser {
         seriesName: row.seqname?.trim() || null,
         seriesIndex: row.seqnumber != null ? String(row.seqnumber) : null,
         language: row.booklang || null,
+        publishedYear: null,
       };
     });
   }
@@ -367,6 +475,56 @@ export class InpxParser {
 
 function isSqliteBuffer(buffer: Buffer): boolean {
   return buffer.length >= SQLITE_MAGIC.length && buffer.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
+}
+
+/** A Flibusta text index: field separator 0x04 plus record separators. */
+function looksLikeTextInp(buffer: Buffer): boolean {
+  return buffer.length > 0 && buffer.includes(0x04) && (buffer.includes(0x0a) || buffer.includes(0x0d));
+}
+
+/**
+ * Flibusta text authors are "Last,First,Middle" per author, authors separated by commas, so three
+ * fields per person. Odd leftovers (a missing middle name) are joined as one name rather than lost.
+ */
+function parseTextAuthors(raw: string): string[] {
+  const parts = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const names: string[] = [];
+  for (let i = 0; i < parts.length;) {
+    const rest = parts.slice(i);
+    if (rest.length >= 3) {
+      const name = [rest[1], rest[2], rest[0]].filter(Boolean).join(' ');
+      if (name) names.push(name);
+      i += 3;
+    } else {
+      const name = rest.join(' ');
+      if (name) names.push(name);
+      break;
+    }
+  }
+  return names;
+}
+
+/**
+ * Maps a text-format record to the FB2 file inside the archive. The file id is the record's
+ * per-book identifier; the archive stores files under one of a few well-known layouts, so the first
+ * layout present in the archive wins.
+ */
+function resolveTextEntryFile(fileId: string, ext: string, entryNames: Set<string>): string | null {
+  if (!fileId) return null;
+  const candidates = [
+    `fb2-${fileId}.${ext}`,
+    `${fileId}.${ext}`,
+    `fb2/${fileId}.${ext}`,
+    `fb2/${fileId.slice(0, 1)}/${fileId}.${ext}`,
+    `fb2/${fileId.slice(0, 2)}/${fileId}.${ext}`,
+  ];
+  for (const candidate of candidates) {
+    if (entryNames.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 function splitCsv(value: string | null): string[] {

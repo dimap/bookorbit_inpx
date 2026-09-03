@@ -149,6 +149,7 @@ export class InpxRepository {
         bookId: bookRow.id,
         title: record.title,
         language: record.language,
+        publishedYear: record.publishedYear,
         seriesName: series?.name ?? null,
         seriesId: series?.id ?? null,
         seriesIndex: record.seriesIndex,
