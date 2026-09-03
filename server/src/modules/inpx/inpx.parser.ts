@@ -117,6 +117,7 @@ export class InpxParser {
       };
 
       try {
+        let crossChecked = false;
         for (const [index, inp] of inpEntries.entries()) {
           try {
             const buffer = await container.readEntry(inp.name);
@@ -128,8 +129,16 @@ export class InpxParser {
           } catch (err) {
             // A single bad index must not sink the whole archive: other languages/producers may be
             // readable, and the failure names are surfaced in the result for the caller to log.
+            let reason = err instanceof Error ? err.message : String(err);
+            // For a ZIP read by the byte-offset reader, cross-check the first SQLite-rejected entry
+            // through unzipper: tells us whether the bytes are genuinely not SQLite or the reader
+            // handed us the wrong slice.
+            if (container.kind === 'zip' && reason.includes('is not a SQLite database') && !crossChecked) {
+              crossChecked = true;
+              reason += ` (${await this.crossCheckSqlite(archivePath, inp.name)})`;
+            }
             failedIndexEntries.push(inp.name);
-            indexFailureReasons.push({ name: inp.name, reason: err instanceof Error ? err.message : String(err) });
+            indexFailureReasons.push({ name: inp.name, reason });
           }
         }
       } finally {
@@ -148,6 +157,22 @@ export class InpxParser {
       return { books, languages: [...languages], failedIndexEntries, indexFailureReasons, ...counts };
     } finally {
       await container.close();
+    }
+  }
+
+  private async crossCheckSqlite(archivePath: string, entryName: string): Promise<string> {
+    try {
+      const { Open } = await import('unzipper');
+      const archive = await Open.file(archivePath);
+      const file = archive.files.find((candidate) => normalizeEntryName(candidate.path) === normalizeEntryName(entryName));
+      if (!file) return 'unzipper: entry missing';
+      const buffer = await file.buffer();
+      if (isSqliteBuffer(buffer)) return 'unzipper: SQLite';
+      const signature = [...buffer.subarray(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
+      return `unzipper: not SQLite (${buffer.length} bytes, signature "${signature}")`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `unzipper failed: ${message}`;
     }
   }
 
@@ -171,8 +196,10 @@ export class InpxParser {
     }
     if (!isSqliteBuffer(buffer)) {
       // Not every `.inp` in the wild is a SQLite database; skip rather than fail the archive, but
-      // record the name so the caller can tell the user which entries were ignored.
-      throw new Error(`${entryName} is not a SQLite database`);
+      // record the name and signature so the caller can tell the user which entries were ignored
+      // and what they actually are.
+      const signature = [...buffer.subarray(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
+      throw new Error(`${entryName} is not a SQLite database (${buffer.length} bytes, signature "${signature}")`);
     }
 
     const dbPath = join(tempDir, `idx-${index}.sqlite`);
