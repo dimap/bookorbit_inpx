@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { Open } from 'unzipper';
 
+import { extractCbzZipEntry, readCbzZipIndex, type CbzZipEntry } from '../../common/cbz-zip-reader';
 import { resolveFb2GenreName } from './fb2-genres';
 
 type SqlRow = Record<string, unknown>;
@@ -12,7 +12,29 @@ const MAX_SQL_ROWS_PER_TABLE = 2_000_000;
 const MAX_ARCHIVE_ENTRIES = 5_000_000;
 const MAX_INP_BYTES = 2 * 1024 * 1024 * 1024;
 
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
+
 const SUPPORTED_BOOK_EXTENSIONS = new Set(['fb2', 'fb2.zip']);
+
+/** Columns the parser understands on the `books` table. Producers may omit some. */
+const BOOKS_COLUMNS = [
+  'id',
+  'file',
+  'booktitle',
+  'authorid',
+  'authors',
+  'booklang',
+  'genre',
+  'seqid',
+  'seqname',
+  'seqnumber',
+  'ext',
+  'size',
+  'del',
+] as const;
+
+/** Columns the parser understands on the `authors` table. */
+const AUTHORS_COLUMNS = ['id', 'firstname', 'middlename', 'lastname', 'nickname'] as const;
 
 export interface InpxBookRecord {
   file: string;
@@ -34,6 +56,8 @@ export interface InpxParseResult {
   skippedNoFile: number;
   skippedEmptyTitle: number;
   skippedUnsupported: number;
+  /** `.inp` entries that existed but could not be read (not SQLite, or unreadable). */
+  failedIndexEntries: string[];
 }
 
 interface InpxAuthorRow {
@@ -68,20 +92,24 @@ export class InpxParser {
    * not actually inside the archive are skipped.
    */
   async parse(archivePath: string): Promise<InpxParseResult> {
-    const archive = await Open.file(archivePath);
-    if (archive.files.length > MAX_ARCHIVE_ENTRIES) {
-      throw new Error(`INPX archive has too many entries: ${archive.files.length}`);
+    const index = await readCbzZipIndex(archivePath);
+    if (!index) {
+      throw new Error('INPX archive could not be read as a ZIP file');
+    }
+    if (index.entries.length > MAX_ARCHIVE_ENTRIES) {
+      throw new Error(`INPX archive has too many entries: ${index.entries.length}`);
     }
 
-    const entryByName = new Map<string, string>();
-    for (const file of archive.files) {
-      entryByName.set(normalizeEntryName(file.path), file.path);
+    const entryByName = new Map<string, CbzZipEntry>();
+    for (const entry of index.entries) {
+      entryByName.set(normalizeEntryName(entry.name), entry);
     }
 
-    const inpEntries = archive.files.filter((file) => /\.inp$/i.test(file.path));
+    const inpEntries = index.entries.filter((entry) => /\.inp$/i.test(entry.name));
     const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-'));
     const languages = new Set<string>();
     const books: InpxBookRecord[] = [];
+    const failedIndexEntries: string[] = [];
     const counts = {
       totalIndexedBooks: 0,
       skippedDel: 0,
@@ -91,22 +119,51 @@ export class InpxParser {
     };
 
     try {
-      for (const inp of inpEntries) {
-        const parsed = await this.parseInpEntry(inp.path, () => inp.buffer(), tempDir, entryByName, languages, counts);
-        books.push(...parsed);
+      for (const [indexInArchive, inp] of inpEntries.entries()) {
+        try {
+          const parsed = await this.parseInpEntry(
+            indexInArchive,
+            inp.name,
+            () => this.readEntryOrThrow(archivePath, inp, inp.name),
+            tempDir,
+            entryByName,
+            languages,
+            counts,
+          );
+          books.push(...parsed);
+        } catch {
+          // A single bad index must not sink the whole archive: other languages/producers may be
+          // readable, and the failure names are surfaced in the result for the caller to log.
+          failedIndexEntries.push(inp.name);
+        }
       }
     } finally {
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
 
-    return { books, languages: [...languages], ...counts };
+    if (books.length === 0 && failedIndexEntries.length > 0) {
+      const detail = failedIndexEntries.slice(0, 5).join(', ');
+      const extra = failedIndexEntries.length > 5 ? ` and ${failedIndexEntries.length - 5} more` : '';
+      throw new Error(`INPX archive has no readable index (failed: ${detail}${extra})`);
+    }
+
+    return { books, languages: [...languages], failedIndexEntries, ...counts };
+  }
+
+  private async readEntryOrThrow(archivePath: string, entry: CbzZipEntry, entryName: string): Promise<Buffer> {
+    const buffer = await extractCbzZipEntry(archivePath, entry);
+    if (buffer === null) {
+      throw new Error(`INPX entry ${entryName} uses unsupported ZIP compression method ${entry.compression}`);
+    }
+    return buffer;
   }
 
   private async parseInpEntry(
+    index: number,
     entryName: string,
     entryBuffer: () => Promise<Buffer>,
     tempDir: string,
-    entryByName: Map<string, string>,
+    entryByName: Map<string, CbzZipEntry>,
     languages: Set<string>,
     counts: {
       totalIndexedBooks: number;
@@ -120,8 +177,13 @@ export class InpxParser {
     if (buffer.length > MAX_INP_BYTES) {
       throw new Error(`INPX index entry ${entryName} is too large`);
     }
+    if (!isSqliteBuffer(buffer)) {
+      // Not every `.inp` in the wild is a SQLite database; skip rather than fail the archive, but
+      // record the name so the caller can tell the user which entries were ignored.
+      throw new Error(`${entryName} is not a SQLite database`);
+    }
 
-    const dbPath = join(tempDir, `${entryName.replace(/[^a-zA-Z0-9.-]/g, '_')}.sqlite`);
+    const dbPath = join(tempDir, `idx-${index}.sqlite`);
     await writeFile(dbPath, buffer);
 
     const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -141,7 +203,11 @@ export class InpxParser {
     const authors = new Map<number, InpxAuthorRow>();
     if (!this.tableExists(db, 'authors')) return authors;
 
-    const statement = db.prepare('SELECT id, firstname, middlename, lastname, nickname FROM authors');
+    const columns = this.availableColumns(db, 'authors');
+    const select = AUTHORS_COLUMNS.filter((column) => columns.has(column));
+    if (select.length === 0) return authors;
+
+    const statement = db.prepare(`SELECT ${select.join(', ')} FROM authors`);
     for (const row of statement.iterate() as IterableIterator<SqlRow>) {
       const id = toNumber(row.id);
       if (id == null) continue;
@@ -158,7 +224,7 @@ export class InpxParser {
 
   private readBooks(
     db: DatabaseSync,
-    entryByName: Map<string, string>,
+    entryByName: Map<string, CbzZipEntry>,
     languages: Set<string>,
     counts: {
       totalIndexedBooks: number;
@@ -170,9 +236,11 @@ export class InpxParser {
   ): InpxBookRow[] {
     if (!this.tableExists(db, 'books')) return [];
 
-    const statement = db.prepare(
-      'SELECT id, file, booktitle, authorid, authors, booklang, genre, seqid, seqname, seqnumber, ext, size, del FROM books',
-    );
+    const columns = this.availableColumns(db, 'books');
+    const select = BOOKS_COLUMNS.filter((column) => columns.has(column));
+    if (select.length === 0) return [];
+
+    const statement = db.prepare(`SELECT ${select.join(', ')} FROM books`);
     const rows: InpxBookRow[] = [];
     for (const row of statement.iterate() as IterableIterator<SqlRow>) {
       if (rows.length >= MAX_SQL_ROWS_PER_TABLE) {
@@ -263,6 +331,16 @@ export class InpxParser {
     const row = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table) as SqlRow | undefined;
     return row !== undefined;
   }
+
+  private availableColumns(db: DatabaseSync, table: string): Set<string> {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) return new Set();
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
+    return new Set(rows.map((row) => toNullableString(row.name)).filter((name): name is string => name !== null));
+  }
+}
+
+function isSqliteBuffer(buffer: Buffer): boolean {
+  return buffer.length >= SQLITE_MAGIC.length && buffer.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
 
 function splitCsv(value: string | null): string[] {

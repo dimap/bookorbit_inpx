@@ -2,8 +2,8 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Open } from 'unzipper';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
+import { extractCbzZipEntry, readCbzZipIndex } from '../../common/cbz-zip-reader';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
@@ -77,6 +77,13 @@ export class InpxImportService {
       }
 
       const parsed = await this.parser.parse(archive.absolutePath);
+      if (parsed.failedIndexEntries.length > 0) {
+        const names = parsed.failedIndexEntries.slice(0, 5).map(sanitizeLogValue).join(', ');
+        const extra = parsed.failedIndexEntries.length > 5 ? ` and ${parsed.failedIndexEntries.length - 5} more` : '';
+        this.logger.warn(
+          `[${event}] [end] archiveId=${archiveId} phase=parse failedIndexes=${parsed.failedIndexEntries.length} entries="${names}${extra}" - some INPX index entries were unreadable and skipped`,
+        );
+      }
       await this.repo.updateArchive(archiveId, { totalBooks: parsed.books.length });
       progress.total = parsed.books.length;
       this.progressStore.set(progress);
@@ -140,8 +147,12 @@ export class InpxImportService {
     onProgress: (processed: number) => void,
   ): Promise<number> {
     const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-enrich-'));
-    const zip = await Open.file(archivePath);
-    const byName = new Map(zip.files.map((file) => [normalizeEntryName(file.path), file]));
+    const zipIndex = await readCbzZipIndex(archivePath);
+    if (!zipIndex) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      throw new Error('INPX archive could not be read');
+    }
+    const byName = new Map(zipIndex.entries.map((file) => [normalizeEntryName(file.name), file]));
     let nextIndex = 0;
     let enriched = 0;
     let failed = 0;
@@ -159,8 +170,8 @@ export class InpxImportService {
             );
             continue;
           }
-          const buffer = await zipEntry.buffer();
-          if (buffer.length === 0) continue;
+          const buffer = await extractCbzZipEntry(archivePath, zipEntry);
+          if (!buffer || buffer.length === 0) continue;
           const tempPath = join(tempDir, `book-${entry.bookId}.fb2`);
           await writeFile(tempPath, buffer);
           try {

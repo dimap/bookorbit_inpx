@@ -5,8 +5,17 @@ import { InpxParser } from './inpx.parser';
 import { InpxRepository } from './inpx.repository';
 import { MetadataService } from '../metadata/metadata.service';
 
-vi.mock('unzipper', () => ({ Open: { file: vi.fn() } }));
-import * as unzipper from 'unzipper';
+vi.mock('../../common/cbz-zip-reader', () => ({
+  readCbzZipIndex: vi.fn(),
+  extractCbzZipEntry: vi.fn(),
+  createCbzZipEntryReadStream: vi.fn(),
+}));
+import { extractCbzZipEntry, readCbzZipIndex } from '../../common/cbz-zip-reader';
+
+const ZIP_ENTRIES = [
+  { name: 'r/rus00001.fb2', compression: 8, compressedSize: 10, uncompressedSize: 10, localHeaderOffset: 0, dataStart: 0 },
+  { name: 'r/rus00002.fb2', compression: 8, compressedSize: 10, uncompressedSize: 10, localHeaderOffset: 0, dataStart: 0 },
+];
 
 describe('InpxImportService', () => {
   const repo = {
@@ -63,14 +72,11 @@ describe('InpxImportService', () => {
       skippedNoFile: 0,
       skippedEmptyTitle: 0,
       skippedUnsupported: 0,
+      failedIndexEntries: [],
     });
     metadataService.extractAndSave.mockResolvedValue(undefined);
-    (unzipper.Open.file as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      files: [
-        { path: 'r/rus00001.fb2', buffer: () => Buffer.from('<FictionBook/>') },
-        { path: 'r/rus00002.fb2', buffer: () => Buffer.from('<FictionBook/>') },
-      ],
-    });
+    (readCbzZipIndex as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ entries: ZIP_ENTRIES, comment: null });
+    (extractCbzZipEntry as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(Buffer.from('<FictionBook/>'));
   });
 
   it('imports the index, enriches from the archive and marks the archive complete', async () => {

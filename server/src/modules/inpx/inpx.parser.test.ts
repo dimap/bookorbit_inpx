@@ -70,6 +70,27 @@ describe('InpxParser', () => {
     const parser = new InpxParser();
     await expect(parser.parse(badPath)).rejects.toThrow();
   });
+
+  it('skips non-SQLite .inp entries and keeps the readable ones', async () => {
+    const archivePath = await buildInpxArchive(testRoot, createInpxDatabase, [
+      { name: 'garbage.inp', content: 'this is not a sqlite database at all' },
+    ]);
+    const parser = new InpxParser();
+
+    const result = await parser.parse(archivePath);
+
+    expect(result.books).toHaveLength(2);
+    expect(result.failedIndexEntries).toEqual(['garbage.inp']);
+  });
+
+  it('throws a clear error when no index entry is readable', async () => {
+    const archivePath = await buildInpxArchive(testRoot, () => undefined, [{ name: 'broken.inp', content: 'not sqlite at all' }], {
+      includeInp: false,
+    });
+    const parser = new InpxParser();
+
+    await expect(parser.parse(archivePath)).rejects.toThrow('no readable index');
+  });
 });
 
 function createInpxDatabase(dbPath: string): void {
@@ -181,10 +202,16 @@ function createInpxDatabase(dbPath: string): void {
   db.close();
 }
 
-async function buildInpxArchive(root: string, createDatabase: (dbPath: string) => void): Promise<string> {
+async function buildInpxArchive(
+  root: string,
+  createDatabase: (dbPath: string) => void,
+  extraEntries: { name: string; content: string }[] = [],
+  options: { includeInp?: boolean } = {},
+): Promise<string> {
   const dbPath = join(root, 'rus.inp');
   const archivePath = join(root, 'library.inpx');
   createDatabase(dbPath);
+  const includeInp = options.includeInp ?? true;
 
   await new Promise<void>((resolve, reject) => {
     const output = createWriteStream(archivePath);
@@ -193,11 +220,14 @@ async function buildInpxArchive(root: string, createDatabase: (dbPath: string) =
     output.on('error', reject);
     archive.on('error', reject);
     archive.pipe(output);
-    archive.file(dbPath, { name: 'rus.inp' });
+    if (includeInp) archive.file(dbPath, { name: 'rus.inp' });
     archive.append('<FictionBook/>', { name: 'r/rus00001.fb2' });
     archive.append('<FictionBook/>', { name: 'a/arthur_c_doyle/hound.fb2' });
     archive.append('<FictionBook/>', { name: 'r/rus00002.fb2' });
     archive.append('<FictionBook/>', { name: 'r/rus00004.epub' });
+    for (const entry of extraEntries) {
+      archive.append(entry.content, { name: entry.name });
+    }
     void archive.finalize();
   });
 
