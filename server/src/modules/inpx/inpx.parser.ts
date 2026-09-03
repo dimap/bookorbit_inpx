@@ -196,10 +196,17 @@ export class InpxParser {
     }
     if (!isSqliteBuffer(buffer)) {
       // Not every `.inp` in the wild is a SQLite database; skip rather than fail the archive, but
-      // record the name and signature so the caller can tell the user which entries were ignored
-      // and what they actually are.
+      // record the name, signature and a text preview so the caller can tell the user which entries
+      // were ignored and what they actually are.
       const signature = [...buffer.subarray(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
-      throw new Error(`${entryName} is not a SQLite database (${buffer.length} bytes, signature "${signature}")`);
+      const rawPreview = buffer.subarray(0, 120).toString('utf8');
+      let preview = '';
+      for (const char of rawPreview) {
+        const code = char.charCodeAt(0);
+        preview += code < 32 && code !== 9 && code !== 10 && code !== 13 ? '.' : char;
+      }
+      preview = preview.replace(/\s+/g, ' ').trim();
+      throw new Error(`${entryName} is not a SQLite database (${buffer.length} bytes, signature "${signature}", text "${preview}")`);
     }
 
     const dbPath = join(tempDir, `idx-${index}.sqlite`);
