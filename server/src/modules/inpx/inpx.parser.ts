@@ -57,6 +57,8 @@ export interface InpxParseResult {
   inpEntryCount: number;
   fb2EntryCount: number;
   sampleBookEntries: string[];
+  /** Contents of small auxiliary files like structure.info/version.info, which describe the layout. */
+  infoFiles: { name: string; content: string }[];
   totalIndexedBooks: number;
   skippedDel: number;
   skippedNoFile: number;
@@ -114,6 +116,13 @@ export class InpxParser {
         .filter((entry) => !/\.inp$/i.test(entry.name))
         .slice(0, 5)
         .map((entry) => entry.name);
+      const infoFiles: { name: string; content: string }[] = [];
+      for (const info of entries.filter((entry) => /\.info$/i.test(entry.name)).slice(0, 5)) {
+        const buffer = await container.readEntry(info.name);
+        if (buffer && buffer.length > 0 && buffer.length <= 8192) {
+          infoFiles.push({ name: info.name, content: buffer.toString('utf8').slice(0, 600) });
+        }
+      }
       const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-'));
       const languages = new Set<string>();
       const books: InpxBookRecord[] = [];
@@ -173,6 +182,7 @@ export class InpxParser {
         inpEntryCount: inpEntries.length,
         fb2EntryCount,
         sampleBookEntries,
+        infoFiles,
         failedIndexEntries,
         indexFailureReasons,
         ...counts,

@@ -77,6 +77,7 @@ describe('InpxImportService', () => {
       inpEntryCount: 0,
       fb2EntryCount: 2,
       sampleBookEntries: ['r/rus00001.fb2'],
+      infoFiles: [],
       totalIndexedBooks: 2,
       skippedDel: 0,
       skippedNoFile: 0,

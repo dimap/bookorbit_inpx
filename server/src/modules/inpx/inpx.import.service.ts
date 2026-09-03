@@ -80,6 +80,11 @@ export class InpxImportService {
       this.logger.log(
         `[${event}] [end] archiveId=${archiveId} phase=parse container=${parsed.containerKind} entries=${parsed.totalEntries} inpIndexes=${parsed.inpEntryCount} fb2Files=${parsed.fb2EntryCount} sample="${sanitizeLogValue(parsed.sampleBookEntries.join(', '))}" - archive structure inspected`,
       );
+      for (const info of parsed.infoFiles) {
+        this.logger.log(
+          `[${event}] [end] archiveId=${archiveId} phase=parse info="${sanitizeLogValue(info.name)}" content="${sanitizeLogValue(info.content.replace(/\r?\n/g, ' / '))}" - archive info file`,
+        );
+      }
       if (parsed.failedIndexEntries.length > 0) {
         const reasons = parsed.indexFailureReasons
           .slice(0, 3)
