@@ -78,10 +78,13 @@ export class InpxImportService {
 
       const parsed = await this.parser.parse(archive.absolutePath);
       if (parsed.failedIndexEntries.length > 0) {
-        const names = parsed.failedIndexEntries.slice(0, 5).map(sanitizeLogValue).join(', ');
-        const extra = parsed.failedIndexEntries.length > 5 ? ` and ${parsed.failedIndexEntries.length - 5} more` : '';
+        const reasons = parsed.indexFailureReasons
+          .slice(0, 3)
+          .map(({ name, reason }) => `${name}: ${reason}`)
+          .join('; ');
+        const extra = parsed.failedIndexEntries.length > 3 ? ` and ${parsed.failedIndexEntries.length - 3} more` : '';
         this.logger.warn(
-          `[${event}] [end] archiveId=${archiveId} phase=parse failedIndexes=${parsed.failedIndexEntries.length} entries="${names}${extra}" - some INPX index entries were unreadable and skipped`,
+          `[${event}] [end] archiveId=${archiveId} phase=parse failedIndexes=${parsed.failedIndexEntries.length} reasons="${sanitizeLogValue(reasons)}"${extra ? ` (${extra})` : ''} - some INPX index entries were unreadable and skipped`,
         );
       }
       await this.repo.updateArchive(archiveId, { totalBooks: parsed.books.length });

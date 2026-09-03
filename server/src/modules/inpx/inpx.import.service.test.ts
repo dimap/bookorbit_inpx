@@ -78,6 +78,7 @@ describe('InpxImportService', () => {
       skippedEmptyTitle: 0,
       skippedUnsupported: 0,
       failedIndexEntries: [],
+      indexFailureReasons: [],
     });
     metadataService.extractAndSave.mockResolvedValue(undefined);
     (openInpxContainer as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(FAKE_CONTAINER);

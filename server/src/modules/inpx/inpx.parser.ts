@@ -58,6 +58,8 @@ export interface InpxParseResult {
   skippedUnsupported: number;
   /** `.inp` entries that existed but could not be read (not SQLite, or unreadable). */
   failedIndexEntries: string[];
+  /** Why each failed entry was rejected, for diagnostics. */
+  indexFailureReasons: { name: string; reason: string }[];
 }
 
 interface InpxAuthorRow {
@@ -105,6 +107,7 @@ export class InpxParser {
       const languages = new Set<string>();
       const books: InpxBookRecord[] = [];
       const failedIndexEntries: string[] = [];
+      const indexFailureReasons: { name: string; reason: string }[] = [];
       const counts = {
         totalIndexedBooks: 0,
         skippedDel: 0,
@@ -118,14 +121,15 @@ export class InpxParser {
           try {
             const buffer = await container.readEntry(inp.name);
             if (!buffer) {
-              throw new Error(`INPX entry ${inp.name} could not be read`);
+              throw new Error('entry could not be read from the archive');
             }
             const parsed = await this.parseInpEntry(index, inp.name, buffer, tempDir, entryNames, languages, counts);
             books.push(...parsed);
-          } catch {
+          } catch (err) {
             // A single bad index must not sink the whole archive: other languages/producers may be
             // readable, and the failure names are surfaced in the result for the caller to log.
             failedIndexEntries.push(inp.name);
+            indexFailureReasons.push({ name: inp.name, reason: err instanceof Error ? err.message : String(err) });
           }
         }
       } finally {
@@ -133,12 +137,15 @@ export class InpxParser {
       }
 
       if (books.length === 0 && failedIndexEntries.length > 0) {
-        const detail = failedIndexEntries.slice(0, 5).join(', ');
-        const extra = failedIndexEntries.length > 5 ? ` and ${failedIndexEntries.length - 5} more` : '';
-        throw new Error(`INPX archive has no readable index (failed: ${detail}${extra})`);
+        const samples = indexFailureReasons
+          .slice(0, 3)
+          .map(({ name, reason }) => `${name} (${reason})`)
+          .join(', ');
+        const extra = failedIndexEntries.length > 3 ? ` and ${failedIndexEntries.length - 3} more` : '';
+        throw new Error(`INPX archive has no readable index (failed: ${samples}${extra})`);
       }
 
-      return { books, languages: [...languages], failedIndexEntries, ...counts };
+      return { books, languages: [...languages], failedIndexEntries, indexFailureReasons, ...counts };
     } finally {
       await container.close();
     }

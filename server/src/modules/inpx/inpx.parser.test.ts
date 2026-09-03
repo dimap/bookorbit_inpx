@@ -90,6 +90,7 @@ describe('InpxParser', () => {
     const parser = new InpxParser();
 
     await expect(parser.parse(archivePath)).rejects.toThrow('no readable index');
+    await expect(parser.parse(archivePath)).rejects.toThrow('broken.inp is not a SQLite database');
   });
 });
 
