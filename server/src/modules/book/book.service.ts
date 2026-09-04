@@ -1466,7 +1466,16 @@ export class BookService {
     const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId));
     const container = await getCachedInpxContainer(archivePath);
     const entry = findInpxContainerEntry(container, file.archiveEntryPath);
-    if (!entry) throw new NotFoundException(`File ${file.bookId} not found in archive`);
+    if (!entry) {
+      const sample = container.entries
+        .slice(0, 10)
+        .map((candidate) => candidate.name)
+        .join(', ');
+      this.logger.warn(
+        `[book.get_inpx_file_info] [fail] bookId=${file.bookId} archivePath="${sanitizeLogValue(archivePath)}" entry="${sanitizeLogValue(file.archiveEntryPath)}" kind=${container.kind} entries=${container.entries.length} sample="${sanitizeLogValue(sample)}" - file entry not found in archive`,
+      );
+      throw new NotFoundException(`File ${file.bookId} not found in archive`);
+    }
     const originalFilename = basename(file.archiveEntryPath);
     return {
       path: file.absolutePath,
@@ -3480,5 +3489,18 @@ export class BookService {
 }
 
 function findInpxContainerEntry(container: InpxContainer, name: string): InpxContainer['entries'][number] | undefined {
-  return container.entries.find((candidate) => candidate.name === name) ?? container.entries.find((candidate) => candidate.name === `fb2-${name}`);
+  const base = name.replace(/\.[^.]+$/, '');
+  const candidates = [
+    name,
+    `fb2-${name}`,
+    `fb2-${base}.fb2`,
+    `fb2/${base}.fb2`,
+    `fb2/${base.slice(0, 1)}/${base}.fb2`,
+    `fb2/${base.slice(0, 2)}/${base}.fb2`,
+  ];
+  for (const candidate of candidates) {
+    const hit = container.entries.find((entry) => entry.name === candidate);
+    if (hit) return hit;
+  }
+  return undefined;
 }
