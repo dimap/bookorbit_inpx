@@ -118,6 +118,23 @@ export class InpxRepository {
       .limit(limit);
   }
 
+  async countBooksByArchive(archiveId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(bookFiles)
+      .where(eq(bookFiles.inpxArchiveId, archiveId));
+    return row?.count ?? 0;
+  }
+
+  async countEnrichedBooksByArchive(archiveId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(bookFiles)
+      .innerJoin(bookMetadata, eq(bookMetadata.bookId, bookFiles.bookId))
+      .where(and(eq(bookFiles.inpxArchiveId, archiveId), isNotNull(bookMetadata.coverSource)));
+    return row?.count ?? 0;
+  }
+
   /**
    * Renames (or merges into) author rows whose name carries the `First Middle: Last` colon artifact
    * imported before the text parser understood that format. Returns how many names changed.

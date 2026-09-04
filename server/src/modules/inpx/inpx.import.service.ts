@@ -190,18 +190,15 @@ export class InpxImportService {
       this.progressStore.set(progress);
 
       const bookEntries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[] = [];
-      let imported = 0;
       for (const chunk of chunkArray(books, INPX_BOOKS_CHUNK_SIZE)) {
         const chunkResult = await this.repo.importBooksChunked(libraryId, folderId, archiveId, chunk);
-        imported += chunkResult.imported;
         bookEntries.push(...chunkResult.bookEntries);
         progress.processed += chunk.length;
         this.progressStore.set(progress);
         this.gateway.emitProgress({ ...progress });
       }
-      await this.repo.updateArchive(archiveId, { importedBooks: imported });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} phase=index durationMs=${Date.now() - startedAt} totalBooks=${books.length} imported=${imported} skipped=${books.length - imported} missingCompanionArchives=${missingShards} - index phase completed`,
+        `[${event}] [end] archiveId=${archiveId} phase=index durationMs=${Date.now() - startedAt} totalBooks=${books.length} skipped=${books.length - bookEntries.length} missingCompanionArchives=${missingShards} - index phase completed`,
       );
 
       progress.phase = 'enrich';
@@ -210,21 +207,23 @@ export class InpxImportService {
       this.progressStore.set(progress);
       this.gateway.emitProgress({ ...progress });
 
-      let enriched = 0;
       if (bookEntries.length > 0) {
-        const result = await this.enrichEntries(archive.absolutePath, bookEntries, (count) => {
+        await this.enrichEntries(archive.absolutePath, bookEntries, (count) => {
           progress.processed = count;
           this.progressStore.set(progress);
           if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
         });
-        enriched = result.enriched;
       }
 
-      await this.repo.updateArchive(archiveId, { status: 'complete', enrichedBooks: enriched, errorMessage: null });
+      const [totalBooks, enrichedCount] = await Promise.all([
+        this.repo.countBooksByArchive(archiveId),
+        this.repo.countEnrichedBooksByArchive(archiveId),
+      ]);
+      await this.repo.updateArchive(archiveId, { status: 'complete', importedBooks: totalBooks, enrichedBooks: enrichedCount, errorMessage: null });
       this.progressStore.clear(archiveId);
-      this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: imported, enrichedBooks: enriched });
+      this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: totalBooks, enrichedBooks: enrichedCount });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} imported=${imported} enriched=${enriched} - inpx import completed`,
+        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} imported=${totalBooks} enriched=${enrichedCount} - inpx import completed`,
       );
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));

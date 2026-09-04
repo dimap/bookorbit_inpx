@@ -29,6 +29,10 @@ describe('InpxImportService', () => {
     createVirtualFolder: vi.fn(),
     updateArchive: vi.fn(),
     importBooksChunked: vi.fn(),
+    countBooksByArchive: vi.fn(),
+    countEnrichedBooksByArchive: vi.fn(),
+    findUnenrichedBookFiles: vi.fn(),
+    fixColonAuthorNames: vi.fn(),
   };
   const parser = { parse: vi.fn() };
   const metadataService = { extractAndSave: vi.fn() };
@@ -66,6 +70,10 @@ describe('InpxImportService', () => {
         { bookId: 102, entryPath: 'r/rus00002.fb2' },
       ],
     });
+    repo.countBooksByArchive.mockResolvedValue(2);
+    repo.countEnrichedBooksByArchive.mockResolvedValue(2);
+    repo.findUnenrichedBookFiles.mockResolvedValue([]);
+    repo.fixColonAuthorNames.mockResolvedValue(0);
     parser.parse.mockResolvedValue({
       books: [
         { file: 'r/rus00001.fb2', format: 'fb2', title: 'One', publishedYear: null },
@@ -127,6 +135,7 @@ describe('InpxImportService', () => {
 
   it('keeps enriching when a single book fails to extract', async () => {
     metadataService.extractAndSave.mockRejectedValueOnce(new Error('bad fb2'));
+    repo.countEnrichedBooksByArchive.mockResolvedValue(1);
 
     await service.startImport(11);
 

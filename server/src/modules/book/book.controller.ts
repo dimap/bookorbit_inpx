@@ -401,45 +401,56 @@ export class BookController {
     @Headers('range') rangeHeader: string | undefined,
     @Res() reply: FastifyReply,
   ) {
-    const { path, size, format, originalFilename, archive } = await this.bookService.getFileInfo(fileId, user);
-    const mimeType = resolveBookMimeType(format);
-    const filename = originalFilename;
+    const event = 'book.serve_file';
+    const startedAt = Date.now();
+    try {
+      const { path, size, format, originalFilename, archive } = await this.bookService.getFileInfo(fileId, user);
+      const mimeType = resolveBookMimeType(format);
+      const filename = originalFilename;
 
-    reply.header('Content-Disposition', contentDispositionHeader('inline', filename, 'download'));
-    reply.type(mimeType);
+      reply.header('Content-Disposition', contentDispositionHeader('inline', filename, 'download'));
+      reply.type(mimeType);
 
-    if (archive) {
-      // Archive-backed files stream a single entry; byte ranges are not supported for them.
-      const read = await archive.container.readEntryStream(archive.entryName);
-      if (!read) throw new NotFoundException('File entry not found in archive');
-      reply.header('Content-Length', size);
-      reply.send(read.stream);
-      return;
-    }
-
-    reply.header('Accept-Ranges', 'bytes');
-
-    if (rangeHeader) {
-      const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
-      if (match) {
-        const start = parseInt(match[1], 10);
-        const end = match[2] ? parseInt(match[2], 10) : size - 1;
-        if (start >= size || end < start || end >= size) {
-          reply.status(416);
-          reply.header('Content-Range', `bytes */${size}`);
-          reply.send();
-          return;
-        }
-        reply.status(206);
-        reply.header('Content-Range', `bytes ${start}-${end}/${size}`);
-        reply.header('Content-Length', end - start + 1);
-        reply.send(createReadStream(path, { start, end }));
+      if (archive) {
+        // Archive-backed files stream a single entry; byte ranges are not supported for them.
+        const read = await archive.container.readEntryStream(archive.entryName);
+        if (!read) throw new NotFoundException('File entry not found in archive');
+        reply.header('Content-Length', size);
+        reply.send(read.stream);
         return;
       }
-    }
 
-    reply.header('Content-Length', size);
-    reply.send(createReadStream(path));
+      reply.header('Accept-Ranges', 'bytes');
+
+      if (rangeHeader) {
+        const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? parseInt(match[2], 10) : size - 1;
+          if (start >= size || end < start || end >= size) {
+            reply.status(416);
+            reply.header('Content-Range', `bytes */${size}`);
+            reply.send();
+            return;
+          }
+          reply.status(206);
+          reply.header('Content-Range', `bytes ${start}-${end}/${size}`);
+          reply.header('Content-Length', end - start + 1);
+          reply.send(createReadStream(path, { start, end }));
+          return;
+        }
+      }
+
+      reply.header('Content-Length', size);
+      reply.send(createReadStream(path));
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      const errorMessage = sanitizeLogValue(error.message);
+      this.logger.warn(
+        `[${event}] [fail] fileId=${fileId} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${error.name} error="${errorMessage}" - serve file failed`,
+      );
+      throw err;
+    }
   }
 
   @Get('files/:fileId/download')
