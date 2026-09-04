@@ -3,7 +3,6 @@ import { InpxImportService } from './inpx.import.service';
 import { InpxProgressStore } from './inpx-progress.store';
 import { InpxParser } from './inpx.parser';
 import { InpxRepository } from './inpx.repository';
-import { MetadataService } from '../metadata/metadata.service';
 
 vi.mock('../../common/inpx-container', () => ({
   openInpxContainer: vi.fn(),
@@ -31,11 +30,9 @@ describe('InpxImportService', () => {
     importBooksChunked: vi.fn(),
     countBooksByArchive: vi.fn(),
     countEnrichedBooksByArchive: vi.fn(),
-    findUnenrichedBookFiles: vi.fn(),
     fixColonAuthorNames: vi.fn(),
   };
   const parser = { parse: vi.fn() };
-  const metadataService = { extractAndSave: vi.fn() };
   const gateway = { emitProgress: vi.fn(), emitCompleted: vi.fn() };
 
   let service: InpxImportService;
@@ -46,7 +43,6 @@ describe('InpxImportService', () => {
     service = new InpxImportService(
       parser as unknown as InpxParser,
       repo as unknown as InpxRepository,
-      metadataService as unknown as MetadataService,
       gateway as unknown as InpxGateway,
       progressStore,
     );
@@ -66,13 +62,12 @@ describe('InpxImportService', () => {
       skipped: 0,
       createdBookIds: [101, 102],
       bookEntries: [
-        { bookId: 101, entryPath: 'r/rus00001.fb2' },
-        { bookId: 102, entryPath: 'r/rus00002.fb2' },
+        { bookId: 101, entryPath: 'r/rus00001.fb2', sourceArchivePath: null },
+        { bookId: 102, entryPath: 'r/rus00002.fb2', sourceArchivePath: null },
       ],
     });
     repo.countBooksByArchive.mockResolvedValue(2);
     repo.countEnrichedBooksByArchive.mockResolvedValue(2);
-    repo.findUnenrichedBookFiles.mockResolvedValue([]);
     repo.fixColonAuthorNames.mockResolvedValue(0);
     parser.parse.mockResolvedValue({
       books: [
@@ -94,11 +89,10 @@ describe('InpxImportService', () => {
       failedIndexEntries: [],
       indexFailureReasons: [],
     });
-    metadataService.extractAndSave.mockResolvedValue(undefined);
     (openInpxContainer as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(FAKE_CONTAINER);
   });
 
-  it('imports the index, enriches from the archive and marks the archive complete', async () => {
+  it('imports the index and reports real book and cover counts', async () => {
     await service.startImport(11);
 
     expect(repo.findArchiveById).toHaveBeenCalledWith(11);
@@ -106,10 +100,7 @@ describe('InpxImportService', () => {
     expect(repo.importBooksChunked).toHaveBeenCalledWith(3, 7, 11, expect.any(Array));
     expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'importing' }));
     expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ totalBooks: 2 }));
-    expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ importedBooks: 2 }));
-    expect(metadataService.extractAndSave).toHaveBeenCalledTimes(2);
-    expect(metadataService.extractAndSave).toHaveBeenCalledWith(101, expect.any(String), 'fb2');
-    expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'complete', enrichedBooks: 2 }));
+    expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'complete', importedBooks: 2, enrichedBooks: 2 }));
     expect(gateway.emitCompleted).toHaveBeenCalledWith({
       archiveId: 11,
       libraryId: 3,
@@ -133,14 +124,15 @@ describe('InpxImportService', () => {
     expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'failed', errorMessage: 'corrupt zip' }));
   });
 
-  it('keeps enriching when a single book fails to extract', async () => {
-    metadataService.extractAndSave.mockRejectedValueOnce(new Error('bad fb2'));
-    repo.countEnrichedBooksByArchive.mockResolvedValue(1);
+  it('enrichment only normalizes author names and refreshes counts without unpacking books', async () => {
+    repo.fixColonAuthorNames.mockResolvedValue(3);
 
-    await service.startImport(11);
+    await service.enrich(11);
 
-    expect(metadataService.extractAndSave).toHaveBeenCalledTimes(2);
-    expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'complete', enrichedBooks: 1 }));
+    expect(repo.fixColonAuthorNames).toHaveBeenCalled();
+    expect(repo.findUnenrichedBookFiles).toBeUndefined();
+    expect(repo.updateArchive).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'complete', importedBooks: 2, enrichedBooks: 2 }));
+    expect(gateway.emitCompleted).toHaveBeenCalledWith({ archiveId: 11, libraryId: 3, importedBooks: 2, enrichedBooks: 2 });
   });
 
   it('tracks live progress in the store and clears it when done', async () => {
@@ -149,6 +141,5 @@ describe('InpxImportService', () => {
     expect(service.getProgress(11)).toBeUndefined();
     const phases = gateway.emitProgress.mock.calls.map((call) => (call[0] as { phase: string }).phase);
     expect(phases).toContain('index');
-    expect(phases).toContain('enrich');
   });
 });

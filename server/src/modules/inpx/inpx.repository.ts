@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
@@ -119,24 +119,6 @@ export class InpxRepository {
     if (bookIds.length === 0) return 0;
     await this.db.delete(books).where(inArray(books.id, bookIds));
     return bookIds.length;
-  }
-
-  /** Book files of an archive whose books have no cover yet, oldest first. */
-  async findUnenrichedBookFiles(
-    archiveId: number,
-    limit: number,
-  ): Promise<{ bookId: number; entryPath: string; sourceArchivePath: string | null }[]> {
-    return this.db
-      .select({
-        bookId: bookFiles.bookId,
-        entryPath: bookFiles.archiveEntryPath,
-        sourceArchivePath: bookFiles.sourceArchivePath,
-      })
-      .from(bookFiles)
-      .innerJoin(bookMetadata, eq(bookMetadata.bookId, bookFiles.bookId))
-      .where(and(eq(bookFiles.inpxArchiveId, archiveId), isNull(bookMetadata.coverSource), isNotNull(bookFiles.archiveEntryPath)))
-      .orderBy(bookFiles.id)
-      .limit(limit);
   }
 
   async countBooksByArchive(archiveId: number): Promise<number> {

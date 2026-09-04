@@ -1,21 +1,16 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { readdirSync, statSync } from 'node:fs';
-import { mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
+import { rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
 import { openInpxContainer } from '../../common/inpx-container';
-import { extractSevenZipAll } from '../../common/sevenzip-cli';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
 import { InpxProgressStore } from './inpx-progress.store';
 import type { InpxBookRecord } from './inpx.parser';
 import { InpxParser } from './inpx.parser';
 import { INPX_BOOKS_CHUNK_SIZE, InpxRepository } from './inpx.repository';
-
-const ENRICH_CONCURRENCY = 4;
-const PROGRESS_EMIT_EVERY = 10;
 
 /** Companion archives whose entry layout has already been logged this process run. */
 const inspectedArchives = new Set<number>();
@@ -28,7 +23,6 @@ export class InpxImportService {
   constructor(
     private readonly parser: InpxParser,
     private readonly repo: InpxRepository,
-    private readonly metadataService: MetadataService,
     private readonly gateway: InpxGateway,
     private readonly progressStore: InpxProgressStore,
   ) {}
@@ -86,26 +80,12 @@ export class InpxImportService {
     await this.repo.updateArchive(archiveId, { status: 'importing', errorMessage: null });
 
     try {
+      // Book content is never unpacked for metadata: the index already carries title, authors,
+      // genres, series and year, and covers live in separate archives. This pass only repairs the
+      // author names imported before the text format was understood.
       const fixedAuthors = await this.repo.fixColonAuthorNames();
       if (fixedAuthors > 0) {
         this.logger.log(`[${event}] [end] archiveId=${archiveId} fixedAuthorNames=${fixedAuthors} - legacy colon author names normalized`);
-      }
-      const failedBookIds = new Set<number>();
-      let enriched = 0;
-      for (;;) {
-        const files = await this.repo.findUnenrichedBookFiles(archiveId, 500);
-        const pending = files.filter((file) => !failedBookIds.has(file.bookId));
-        if (pending.length === 0) break;
-
-        progress.total += pending.length;
-        this.progressStore.set(progress);
-        const result = await this.enrichEntries(archive.absolutePath, pending, (count) => {
-          progress.processed = count;
-          this.progressStore.set(progress);
-          if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
-        });
-        enriched += result.enriched;
-        for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
       }
 
       const [totalBooks, enrichedCount] = await Promise.all([
@@ -116,7 +96,7 @@ export class InpxImportService {
       this.progressStore.clear(archiveId);
       this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: totalBooks, enrichedBooks: enrichedCount });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} enriched=${enriched} failed=${failedBookIds.size} totalEnriched=${enrichedCount} - enrichment completed`,
+        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} fixedAuthorNames=${fixedAuthors} totalEnriched=${enrichedCount} - enrichment completed`,
       );
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -206,20 +186,6 @@ export class InpxImportService {
         `[${event}] [end] archiveId=${archiveId} phase=index durationMs=${Date.now() - startedAt} totalBooks=${books.length} skipped=${books.length - bookEntries.length} missingCompanionArchives=${missingShards} - index phase completed`,
       );
 
-      progress.phase = 'enrich';
-      progress.processed = 0;
-      progress.total = bookEntries.length;
-      this.progressStore.set(progress);
-      this.gateway.emitProgress({ ...progress });
-
-      if (bookEntries.length > 0) {
-        await this.enrichEntries(archive.absolutePath, bookEntries, (count) => {
-          progress.processed = count;
-          this.progressStore.set(progress);
-          if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
-        });
-      }
-
       const [totalBooks, enrichedCount] = await Promise.all([
         this.repo.countBooksByArchive(archiveId),
         this.repo.countEnrichedBooksByArchive(archiveId),
@@ -307,123 +273,6 @@ export class InpxImportService {
       );
     }
   }
-
-  /**
-   * Extracts each FB2 from its archive to a temp file and lets the standard metadata pipeline fill
-   * description, ISBN, dates, cover and author sort names. Runs with bounded concurrency; one bad
-   * file is logged and skipped, never fatal. Entries are grouped by their source archive so each
-   * companion 7z is extracted once.
-   */
-  private async enrichEntries(
-    inpxPath: string,
-    entries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[],
-    onProgress: (processed: number) => void,
-  ): Promise<{ enriched: number; failedBookIds: number[] }> {
-    const groups = new Map<string, { bookId: number; entryPath: string }[]>();
-    for (const entry of entries) {
-      const key = entry.sourceArchivePath ?? inpxPath;
-      let list = groups.get(key);
-      if (!list) {
-        list = [];
-        groups.set(key, list);
-      }
-      list.push({ bookId: entry.bookId, entryPath: entry.entryPath });
-    }
-
-    let enriched = 0;
-    const failedBookIds = new Set<number>();
-    let runningTotal = 0;
-    for (const [archivePath, groupEntries] of groups) {
-      const result = await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
-        onProgress(runningTotal + localProcessed);
-      });
-      enriched += result.enriched;
-      for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
-      runningTotal += groupEntries.length;
-    }
-    return { enriched, failedBookIds: [...failedBookIds] };
-  }
-
-  private async enrichFromContainer(
-    archivePath: string,
-    entries: { bookId: number; entryPath: string }[],
-    onProgress: (processed: number) => void,
-  ): Promise<{ enriched: number; failedBookIds: number[] }> {
-    const tempDir = await mkdtemp(join(enrichTempBase(), 'inpx-enrich-'));
-    const container = await openInpxContainer(archivePath);
-    let nextIndex = 0;
-    let enriched = 0;
-    const failedBookIds = new Set<number>();
-    const isSevenZip = container.kind === '7z';
-    // The index `EXT` does not always match the real file (EPUB books often indexed as fb2), so the
-    // file is located by its id and the format is sniffed from the content rather than trusted.
-    let fileByBasename: Map<string, string> | null = null;
-    if (isSevenZip) {
-      await extractSevenZipAll(archivePath, tempDir);
-      fileByBasename = buildBasenameMap(tempDir);
-    }
-
-    const worker = async (): Promise<void> => {
-      while (nextIndex < entries.length) {
-        const entry = entries[nextIndex]!;
-        nextIndex += 1;
-        const startedAt = Date.now();
-        try {
-          const fileId = basename(entry.entryPath).replace(/\.[^.]+$/, '');
-          let bookPath: string | null = null;
-          let bookFormat: BookFormat = null;
-          if (isSevenZip) {
-            for (const ext of BOOK_FILE_EXTENSIONS) {
-              const hit = fileByBasename?.get(`${fileId}.${ext}`);
-              if (hit) {
-                bookPath = hit;
-                break;
-              }
-            }
-            if (bookPath) bookFormat = detectBookFormat(await readFirstBytes(bookPath));
-          } else {
-            const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
-            if (buffer && buffer.length > 0) {
-              bookFormat = detectBookFormat(buffer);
-              if (bookFormat) {
-                bookPath = join(tempDir, `book-${entry.bookId}.${bookFormat}`);
-                await writeFile(bookPath, buffer);
-              }
-            }
-          }
-          if (!bookPath || !bookFormat) continue;
-          try {
-            await this.metadataService.extractAndSave(entry.bookId, bookPath, bookFormat);
-            enriched += 1;
-          } finally {
-            if (!isSevenZip) await rm(bookPath, { force: true }).catch(() => undefined);
-          }
-        } catch (err) {
-          failedBookIds.add(entry.bookId);
-          const error = err instanceof Error ? err : new Error(String(err));
-          const errorMessage = sanitizeLogValue(error.message);
-          this.logger.warn(
-            `[inpx.enrich] [fail] bookId=${entry.bookId} durationMs=${Date.now() - startedAt} errorClass=${error.name} error="${errorMessage}" - enrichment failed`,
-          );
-        }
-        onProgress(Math.min(nextIndex, entries.length));
-      }
-    };
-
-    try {
-      await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
-    } finally {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-      await container.close();
-    }
-
-    if (failedBookIds.size > 0) {
-      this.logger.warn(
-        `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failedBookIds.size} - enrichment completed with failures`,
-      );
-    }
-    return { enriched, failedBookIds: [...failedBookIds] };
-  }
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -453,55 +302,4 @@ function cleanupStaleEnrichTempDirs(): void {
     if (!name.startsWith('inpx-enrich-')) continue;
     void rm(join(base, name), { recursive: true, force: true }).catch(() => undefined);
   }
-}
-
-type BookFormat = 'fb2' | 'epub' | null;
-
-const BOOK_FILE_EXTENSIONS = ['fb2', 'epub', 'zip', 'fb2.zip'];
-
-/** Sniffs the first bytes: `PK` is a ZIP (EPUB), `<?`/BOM is XML (FB2). */
-function detectBookFormat(buffer: Buffer): BookFormat {
-  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return 'epub';
-  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'fb2';
-  if (buffer.length >= 1 && buffer[0] === 0x3c) return 'fb2';
-  return null;
-}
-
-async function readFirstBytes(path: string): Promise<Buffer> {
-  const handle = await open(path, 'r');
-  try {
-    const buffer = Buffer.alloc(16);
-    const { bytesRead } = await handle.read(buffer, 0, 16, 0);
-    return buffer.subarray(0, bytesRead);
-  } finally {
-    await handle.close();
-  }
-}
-
-function buildBasenameMap(root: string): Map<string, string> {
-  const map = new Map<string, string>();
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const full = join(dir, name);
-      try {
-        const fileStat = statSync(full);
-        if (fileStat.isDirectory()) {
-          stack.push(full);
-        } else if (!map.has(name)) {
-          map.set(name, full);
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-  return map;
 }
