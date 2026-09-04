@@ -69,6 +69,7 @@ export class InpxImportService {
   private async runEnrich(archiveId: number): Promise<void> {
     const event = 'inpx.enrich';
     const startedAt = Date.now();
+    cleanupStaleEnrichTempDirs();
     const archive = await this.repo.findArchiveById(archiveId);
     if (!archive) throw new NotFoundException(`INPX archive ${archiveId} not found`);
     const libraryId = archive.libraryId;
@@ -437,6 +438,21 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 function enrichTempBase(): string {
   const dataPath = process.env.APP_DATA_PATH;
   return dataPath && dataPath !== '' ? dataPath : tmpdir();
+}
+
+/** Removes `inpx-enrich-*` temp dirs left behind by a crashed run so extracted shards do not pile up. */
+function cleanupStaleEnrichTempDirs(): void {
+  const base = enrichTempBase();
+  let names: string[];
+  try {
+    names = readdirSync(base);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith('inpx-enrich-')) continue;
+    void rm(join(base, name), { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 type BookFormat = 'fb2' | 'epub' | null;
