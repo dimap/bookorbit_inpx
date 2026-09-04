@@ -99,6 +99,15 @@ export class InpxService {
     return this.toApiArchive(archive);
   }
 
+  async enrich(archiveId: number, user: RequestUser): Promise<InpxArchive> {
+    const archive = await this.findOwnedArchive(archiveId, user);
+    if (this.importService.isRunning(archiveId)) {
+      throw new BadRequestException('INPX import or enrichment is already running for this archive');
+    }
+    void this.importService.enrich(archiveId).catch(() => undefined);
+    return this.toApiArchive(archive);
+  }
+
   async remove(archiveId: number, user: RequestUser): Promise<void> {
     const event = 'inpx.remove';
     const startedAt = Date.now();

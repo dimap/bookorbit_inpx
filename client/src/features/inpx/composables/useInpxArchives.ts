@@ -88,6 +88,18 @@ export function useInpxArchives(libraryId: number) {
     }
   }
 
+  async function startEnrich(archiveId: number): Promise<void> {
+    setBusy(archiveId, true)
+    try {
+      const res = await api(`/api/v1/inpx/archives/${archiveId}/enrich`, { method: 'POST' })
+      if (!res.ok) throw new Error(await extractError(res))
+      const archive = (await res.json()) as InpxArchive
+      patchArchive(archive)
+    } finally {
+      setBusy(archiveId, false)
+    }
+  }
+
   async function remove(archiveId: number): Promise<void> {
     setBusy(archiveId, true)
     try {
@@ -119,7 +131,7 @@ export function useInpxArchives(libraryId: number) {
     return progressMap.value.get(archiveId)?.status === 'importing'
   }
 
-  return { archives, loading, failed, load, register, startImport, remove, subscribe, isBusy, getProgress, isImporting }
+  return { archives, loading, failed, load, register, startImport, startEnrich, remove, subscribe, isBusy, getProgress, isImporting }
 }
 
 async function extractError(res: Response): Promise<string> {

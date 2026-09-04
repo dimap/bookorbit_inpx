@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
-import { Archive, Loader2, Play, Trash2 } from '@lucide/vue'
+import { Archive, Loader2, Play, Sparkles, Trash2 } from '@lucide/vue'
 import type { InpxArchive, InpxImportProgressEvent } from '@bookorbit/types'
 import { Permission } from '@bookorbit/types'
 import { Button } from '@/components/ui/button'
@@ -19,7 +19,7 @@ const { t } = useI18n()
 const { hasPermission } = usePermissions()
 const canManage = computed(() => hasPermission(Permission.LibraryUpload))
 
-const { archives, loading, failed, load, register, startImport, remove, subscribe, isBusy, getProgress, isImporting } = useInpxArchives(
+const { archives, loading, failed, load, register, startImport, startEnrich, remove, subscribe, isBusy, getProgress, isImporting } = useInpxArchives(
   props.libraryId,
 )
 
@@ -55,6 +55,15 @@ async function handleImport(archive: InpxArchive) {
     await startImport(archive.id)
   } catch (err) {
     toast.error(t('settings.admin.libraries.inpx.importFailed'), { description: errMessage(err) })
+  }
+}
+
+async function handleEnrich(archive: InpxArchive) {
+  if (isBusy(archive.id)) return
+  try {
+    await startEnrich(archive.id)
+  } catch (err) {
+    toast.error(t('settings.admin.libraries.inpx.enrichFailed'), { description: errMessage(err) })
   }
 }
 
@@ -173,6 +182,10 @@ function errMessage(err: unknown): string {
           >
             <Play :size="13" aria-hidden="true" />
             {{ t('settings.admin.libraries.inpx.import') }}
+          </Button>
+          <Button v-if="archive.importedBooks > 0" variant="outline" size="sm" :disabled="isBusy(archive.id)" @click="handleEnrich(archive)">
+            <Sparkles :size="13" aria-hidden="true" />
+            {{ t('settings.admin.libraries.inpx.enrich') }}
           </Button>
           <Button variant="ghost" size="sm" :disabled="isBusy(archive.id)" @click="requestRemove(archive)">
             <Trash2 :size="13" aria-hidden="true" />

@@ -1229,6 +1229,7 @@
           "enrichedBooks": "{count} enriched",
           "import": "Import",
           "importing": "Importing...",
+          "enrich": "Extract metadata",
           "remove": "Remove",
           "removeTitle": "Remove INPX archive?",
           "removeDescription": "This removes the archive and every book imported from it from the library. The archive file on disk is left untouched.",
@@ -1237,7 +1238,8 @@
           "registerFailed": "Could not register the archive",
           "loadFailed": "Could not load INPX archives",
           "removeFailed": "Could not remove the archive",
-          "importFailed": "Could not start the import"
+          "importFailed": "Could not start the import",
+          "enrichFailed": "Could not start metadata extraction"
         },
         "scannedAt": "Scanned {time}",
         "detailRegion": "Details for {name}"

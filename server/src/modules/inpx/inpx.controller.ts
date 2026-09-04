@@ -39,6 +39,14 @@ export class InpxController {
     return this.inpxService.import(archiveId, user);
   }
 
+  @Post('archives/:id/enrich')
+  @RequirePermission(Permission.LibraryUpload)
+  @RequireLibraryAccess('editor')
+  @HttpCode(HttpStatus.ACCEPTED)
+  enrich(@Param('id', ParseIntPipe) archiveId: number, @CurrentUser() user: RequestUser) {
+    return this.inpxService.enrich(archiveId, user);
+  }
+
   @Delete('archives/:id')
   @RequirePermission(Permission.LibraryUpload)
   @RequireLibraryAccess('editor')

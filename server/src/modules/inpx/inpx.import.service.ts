@@ -53,6 +53,74 @@ export class InpxImportService {
     return run;
   }
 
+  /**
+   * Runs metadata extraction (covers, descriptions, ISBNs) for the archive's books that do not have
+   * a cover yet. Useful after an import whose enrichment was interrupted, or when only the index
+   * metadata was wanted first. Re-entrant: a run already in flight is shared.
+   */
+  enrich(archiveId: number): Promise<void> {
+    const existing = this.running.get(archiveId);
+    if (existing) return existing;
+    const run = this.runEnrich(archiveId).finally(() => this.running.delete(archiveId));
+    this.running.set(archiveId, run);
+    return run;
+  }
+
+  private async runEnrich(archiveId: number): Promise<void> {
+    const event = 'inpx.enrich';
+    const startedAt = Date.now();
+    const archive = await this.repo.findArchiveById(archiveId);
+    if (!archive) throw new NotFoundException(`INPX archive ${archiveId} not found`);
+    const libraryId = archive.libraryId;
+
+    const progress: InpxImportProgressEvent = {
+      archiveId,
+      libraryId,
+      phase: 'enrich',
+      status: 'importing',
+      processed: 0,
+      total: 0,
+    };
+    this.progressStore.set(progress);
+    await this.repo.updateArchive(archiveId, { status: 'importing', errorMessage: null });
+
+    try {
+      const failedBookIds = new Set<number>();
+      let enriched = 0;
+      for (;;) {
+        const files = await this.repo.findUnenrichedBookFiles(archiveId, 500);
+        const pending = files.filter((file) => !failedBookIds.has(file.bookId));
+        if (pending.length === 0) break;
+
+        progress.total += pending.length;
+        this.progressStore.set(progress);
+        const result = await this.enrichEntries(archive.absolutePath, pending, (count) => {
+          progress.processed = count;
+          this.progressStore.set(progress);
+          if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
+        });
+        enriched += result.enriched;
+        for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
+      }
+
+      await this.repo.updateArchive(archiveId, { status: 'complete', enrichedBooks: enriched, errorMessage: null });
+      this.progressStore.clear(archiveId);
+      this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: archive.importedBooks, enrichedBooks: enriched });
+      this.logger.log(
+        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} enriched=${enriched} failed=${failedBookIds.size} - enrichment completed`,
+      );
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      const errorMessage = sanitizeLogValue(error.message);
+      this.logger.warn(
+        `[${event}] [fail] archiveId=${archiveId} durationMs=${Date.now() - startedAt} errorClass=${error.name} error="${errorMessage}" - enrichment failed`,
+      );
+      this.progressStore.clear(archiveId);
+      await this.repo.updateArchive(archiveId, { status: 'failed', errorMessage: error.message });
+      throw err;
+    }
+  }
+
   private async runImport(archiveId: number): Promise<void> {
     const event = 'inpx.import';
     const startedAt = Date.now();
@@ -140,11 +208,12 @@ export class InpxImportService {
 
       let enriched = 0;
       if (bookEntries.length > 0) {
-        enriched = await this.enrichEntries(archive.absolutePath, bookEntries, (count) => {
+        const result = await this.enrichEntries(archive.absolutePath, bookEntries, (count) => {
           progress.processed = count;
           this.progressStore.set(progress);
           if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
         });
+        enriched = result.enriched;
       }
 
       await this.repo.updateArchive(archiveId, { status: 'complete', enrichedBooks: enriched, errorMessage: null });
@@ -235,13 +304,13 @@ export class InpxImportService {
    * Extracts each FB2 from its archive to a temp file and lets the standard metadata pipeline fill
    * description, ISBN, dates, cover and author sort names. Runs with bounded concurrency; one bad
    * file is logged and skipped, never fatal. Entries are grouped by their source archive so each
-   * companion 7z is opened and closed once.
+   * companion 7z is extracted once.
    */
   private async enrichEntries(
     inpxPath: string,
     entries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[],
     onProgress: (processed: number) => void,
-  ): Promise<number> {
+  ): Promise<{ enriched: number; failedBookIds: number[] }> {
     const groups = new Map<string, { bookId: number; entryPath: string }[]>();
     for (const entry of entries) {
       const key = entry.sourceArchivePath ?? inpxPath;
@@ -254,26 +323,29 @@ export class InpxImportService {
     }
 
     let enriched = 0;
+    const failedBookIds = new Set<number>();
     let runningTotal = 0;
     for (const [archivePath, groupEntries] of groups) {
-      enriched += await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
+      const result = await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
         onProgress(runningTotal + localProcessed);
       });
+      enriched += result.enriched;
+      for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
       runningTotal += groupEntries.length;
     }
-    return enriched;
+    return { enriched, failedBookIds: [...failedBookIds] };
   }
 
   private async enrichFromContainer(
     archivePath: string,
     entries: { bookId: number; entryPath: string }[],
     onProgress: (processed: number) => void,
-  ): Promise<number> {
+  ): Promise<{ enriched: number; failedBookIds: number[] }> {
     const tempDir = await mkdtemp(join(enrichTempBase(), 'inpx-enrich-'));
     const container = await openInpxContainer(archivePath);
     let nextIndex = 0;
     let enriched = 0;
-    let failed = 0;
+    const failedBookIds = new Set<number>();
     const isSevenZip = container.kind === '7z';
     if (isSevenZip) {
       // Solid 7z shards decompress the whole block to reach one file, so extract the shard once and
@@ -306,7 +378,7 @@ export class InpxImportService {
             if (!isSevenZip) await rm(fb2Path, { force: true }).catch(() => undefined);
           }
         } catch (err) {
-          failed += 1;
+          failedBookIds.add(entry.bookId);
           const error = err instanceof Error ? err : new Error(String(err));
           const errorMessage = sanitizeLogValue(error.message);
           this.logger.warn(
@@ -324,12 +396,12 @@ export class InpxImportService {
       await container.close();
     }
 
-    if (failed > 0) {
+    if (failedBookIds.size > 0) {
       this.logger.warn(
-        `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failed} - enrichment completed with failures`,
+        `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failedBookIds.size} - enrichment completed with failures`,
       );
     }
-    return enriched;
+    return { enriched, failedBookIds: [...failedBookIds] };
   }
 }
 
