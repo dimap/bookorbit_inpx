@@ -23,6 +23,10 @@ export class BookReadService {
     return this.bookRepo.findPrimaryReaderFilesByBookIds(bookIds);
   }
 
+  findInpxArchiveAbsolutePath(archiveId: number) {
+    return this.bookRepo.findInpxArchiveAbsolutePath(archiveId);
+  }
+
   findCards(opts: { where: SQL | undefined; orderBy: SQL[]; limit: number; offset: number; userId: number }) {
     return this.bookRepo.findCards(opts);
   }

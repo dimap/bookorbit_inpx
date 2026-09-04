@@ -244,7 +244,7 @@ function createInpxDatabase(dbPath: string): void {
   );
   db.prepare('INSERT INTO books VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
     5,
-    'r/rus00004.epub',
+    'r/rus00004.djvu',
     'Unsupported Format Book',
     '1',
     'Arthur Conan Doyle',
@@ -256,7 +256,7 @@ function createInpxDatabase(dbPath: string): void {
     null,
     null,
     0,
-    'epub',
+    'djvu',
     '2020-01-05',
     500,
   );
@@ -285,7 +285,7 @@ async function buildInpxArchive(
     archive.append('<FictionBook/>', { name: 'r/rus00001.fb2' });
     archive.append('<FictionBook/>', { name: 'a/arthur_c_doyle/hound.fb2' });
     archive.append('<FictionBook/>', { name: 'r/rus00002.fb2' });
-    archive.append('<FictionBook/>', { name: 'r/rus00004.epub' });
+    archive.append('<FictionBook/>', { name: 'r/rus00004.djvu' });
     for (const entry of extraEntries) {
       archive.append(entry.content, { name: entry.name });
     }

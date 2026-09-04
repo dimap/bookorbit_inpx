@@ -14,7 +14,7 @@ const MAX_INP_BYTES = 2 * 1024 * 1024 * 1024;
 
 const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
 
-const SUPPORTED_BOOK_EXTENSIONS = new Set(['fb2', 'fb2.zip']);
+const SUPPORTED_BOOK_EXTENSIONS = new Set(['fb2', 'fb2.zip', 'epub', 'pdf', 'mobi', 'azw', 'azw3', 'cbz', 'cbr', 'cb7', 'fb3']);
 
 /** Columns the parser understands on the `books` table. Producers may omit some. */
 const BOOKS_COLUMNS = [

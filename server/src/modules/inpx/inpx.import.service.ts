@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { existsSync } from 'node:fs';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { readdirSync, statSync } from 'node:fs';
+import { mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
@@ -354,10 +354,12 @@ export class InpxImportService {
     let enriched = 0;
     const failedBookIds = new Set<number>();
     const isSevenZip = container.kind === '7z';
+    // The index `EXT` does not always match the real file (EPUB books often indexed as fb2), so the
+    // file is located by its id and the format is sniffed from the content rather than trusted.
+    let fileByBasename: Map<string, string> | null = null;
     if (isSevenZip) {
-      // Solid 7z shards decompress the whole block to reach one file, so extract the shard once and
-      // read its entries from disk instead of spawning a 7z process per book.
       await extractSevenZipAll(archivePath, tempDir);
+      fileByBasename = buildBasenameMap(tempDir);
     }
 
     const worker = async (): Promise<void> => {
@@ -366,23 +368,34 @@ export class InpxImportService {
         nextIndex += 1;
         const startedAt = Date.now();
         try {
-          let fb2Path: string | null = null;
+          const fileId = basename(entry.entryPath).replace(/\.[^.]+$/, '');
+          let bookPath: string | null = null;
+          let bookFormat: BookFormat = null;
           if (isSevenZip) {
-            fb2Path =
-              [entry.entryPath, `fb2-${entry.entryPath}`].map((name) => join(tempDir, basename(name))).find((path) => existsSync(path)) ?? null;
+            for (const ext of BOOK_FILE_EXTENSIONS) {
+              const hit = fileByBasename?.get(`${fileId}.${ext}`);
+              if (hit) {
+                bookPath = hit;
+                break;
+              }
+            }
+            if (bookPath) bookFormat = detectBookFormat(await readFirstBytes(bookPath));
           } else {
             const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
             if (buffer && buffer.length > 0) {
-              fb2Path = join(tempDir, `book-${entry.bookId}.fb2`);
-              await writeFile(fb2Path, buffer);
+              bookFormat = detectBookFormat(buffer);
+              if (bookFormat) {
+                bookPath = join(tempDir, `book-${entry.bookId}.${bookFormat}`);
+                await writeFile(bookPath, buffer);
+              }
             }
           }
-          if (!fb2Path) continue;
+          if (!bookPath || !bookFormat) continue;
           try {
-            await this.metadataService.extractAndSave(entry.bookId, fb2Path, 'fb2');
+            await this.metadataService.extractAndSave(entry.bookId, bookPath, bookFormat);
             enriched += 1;
           } finally {
-            if (!isSevenZip) await rm(fb2Path, { force: true }).catch(() => undefined);
+            if (!isSevenZip) await rm(bookPath, { force: true }).catch(() => undefined);
           }
         } catch (err) {
           failedBookIds.add(entry.bookId);
@@ -424,4 +437,55 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 function enrichTempBase(): string {
   const dataPath = process.env.APP_DATA_PATH;
   return dataPath && dataPath !== '' ? dataPath : tmpdir();
+}
+
+type BookFormat = 'fb2' | 'epub' | null;
+
+const BOOK_FILE_EXTENSIONS = ['fb2', 'epub', 'zip', 'fb2.zip'];
+
+/** Sniffs the first bytes: `PK` is a ZIP (EPUB), `<?`/BOM is XML (FB2). */
+function detectBookFormat(buffer: Buffer): BookFormat {
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return 'epub';
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'fb2';
+  if (buffer.length >= 1 && buffer[0] === 0x3c) return 'fb2';
+  return null;
+}
+
+async function readFirstBytes(path: string): Promise<Buffer> {
+  const handle = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buffer, 0, 16, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+function buildBasenameMap(root: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const full = join(dir, name);
+      try {
+        const fileStat = statSync(full);
+        if (fileStat.isDirectory()) {
+          stack.push(full);
+        } else if (!map.has(name)) {
+          map.set(name, full);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  return map;
 }

@@ -1855,6 +1855,7 @@ export class BookRepository {
 
   async findPrimaryFilesByBookIds(bookIds: number[]): Promise<
     {
+      id: number;
       bookId: number;
       absolutePath: string;
       format: string | null;
@@ -1862,11 +1863,13 @@ export class BookRepository {
       storageKind: string | null;
       archiveEntryPath: string | null;
       inpxArchiveId: number | null;
+      sourceArchivePath: string | null;
     }[]
   > {
     if (bookIds.length === 0) return [];
     return this.db
       .select({
+        id: bookFiles.id,
         bookId: books.id,
         absolutePath: bookFiles.absolutePath,
         format: bookFiles.format,
@@ -1874,6 +1877,7 @@ export class BookRepository {
         storageKind: bookFiles.storageKind,
         archiveEntryPath: bookFiles.archiveEntryPath,
         inpxArchiveId: bookFiles.inpxArchiveId,
+        sourceArchivePath: bookFiles.sourceArchivePath,
       })
       .from(books)
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))

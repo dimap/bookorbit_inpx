@@ -1,9 +1,12 @@
 import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { stat } from 'fs/promises';
+import { rm, stat, writeFile } from 'fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import * as unzipper from 'unzipper';
 import { XMLParser } from 'fast-xml-parser';
 
 import type { EpubBookInfo, EpubManifestItem, EpubSpineItem, EpubTocItem } from '@bookorbit/types';
+import { getCachedInpxContainer, type InpxContainer } from '../../../common/inpx-container';
 import { BookReadService } from '../../book/book-read.service';
 import { LibraryService } from '../../library/library.service';
 import type { RequestUser } from '../../../common/types/request-user';
@@ -328,12 +331,59 @@ export class EpubService {
       const file = await this.bookReadService.findFileById(fileId);
       if (!file || file.bookId !== bookId) throw new NotFoundException(`File ${fileId} not found for book ${bookId}`);
       if (file.format !== 'epub') throw new NotFoundException(`File ${fileId} is not an EPUB file`);
+      if (file.storageKind === 'inpx') return this.resolveArchiveEpubPath(file);
       return file.absolutePath;
     }
 
     const [file] = await this.bookReadService.findPrimaryFilesByBookIds([bookId]);
     if (!file || file.format !== 'epub') throw new NotFoundException(`No primary EPUB file for book ${bookId}`);
+    if (file.storageKind === 'inpx') return this.resolveArchiveEpubPath(file);
     return file.absolutePath;
+  }
+
+  private readonly inpxEpubCache = new Map<string, string>();
+  private static readonly MAX_INPX_EPUB_CACHE = 8;
+
+  /**
+   * The web reader opens the EPUB with `unzipper.Open.file(path)`, which needs a real file. Books
+   * backed by an INPX/companion archive get their EPUB extracted to a temp file that is cached per
+   * book file id so the info and stream requests share it.
+   */
+  private async resolveArchiveEpubPath(file: {
+    id: number;
+    archiveEntryPath: string | null;
+    inpxArchiveId: number | null;
+    sourceArchivePath: string | null;
+  }): Promise<string> {
+    const cached = this.inpxEpubCache.get(String(file.id));
+    if (cached) return cached;
+
+    const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId));
+    const container = await getCachedInpxContainer(archivePath);
+    const entry = findInpxEntry(container, file.archiveEntryPath);
+    if (!entry) throw new NotFoundException(`File ${file.id} not found in archive`);
+    const buffer = await container.readEntry(entry.name);
+    if (!buffer) throw new NotFoundException(`File ${file.id} not found in archive`);
+
+    const tempPath = join(tmpdir(), `inpx-epub-${file.id}-${basename(entry.name)}`);
+    await writeFile(tempPath, buffer);
+    if (this.inpxEpubCache.size >= EpubService.MAX_INPX_EPUB_CACHE) {
+      const oldest = this.inpxEpubCache.keys().next().value as string | undefined;
+      if (oldest !== undefined) {
+        const oldPath = this.inpxEpubCache.get(oldest);
+        this.inpxEpubCache.delete(oldest);
+        if (oldPath) void rm(oldPath, { force: true }).catch(() => undefined);
+      }
+    }
+    this.inpxEpubCache.set(String(file.id), tempPath);
+    return tempPath;
+  }
+
+  private async resolveInpxArchivePath(inpxArchiveId: number | null): Promise<string> {
+    if (inpxArchiveId == null) throw new NotFoundException('File has no archive source');
+    const archivePath = await this.bookReadService.findInpxArchiveAbsolutePath(inpxArchiveId);
+    if (!archivePath) throw new NotFoundException(`INPX archive ${inpxArchiveId} not found on disk`);
+    return archivePath;
   }
 
   private async getCachedEntry(epubPath: string): Promise<CacheEntry> {
@@ -362,4 +412,15 @@ export class EpubService {
     const oldest = [...this.cache.entries()].sort((a, b) => a[1].lastAccessed - b[1].lastAccessed)[0];
     if (oldest) this.cache.delete(oldest[0]);
   }
+}
+
+function findInpxEntry(container: InpxContainer, entryPath: string | null): InpxContainer['entries'][number] | undefined {
+  if (!entryPath) return undefined;
+  const base = entryPath.replace(/\.[^.]+$/, '');
+  const candidates = [entryPath, `fb2-${entryPath}`, `${base}.epub`, `${base}.fb2`, `fb2-${base}.fb2`];
+  for (const candidate of candidates) {
+    const hit = container.entries.find((entry) => entry.name === candidate);
+    if (hit) return hit;
+  }
+  return undefined;
 }
