@@ -107,11 +107,15 @@ export class InpxImportService {
         for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
       }
 
-      await this.repo.updateArchive(archiveId, { status: 'complete', enrichedBooks: enriched, errorMessage: null });
+      const [totalBooks, enrichedCount] = await Promise.all([
+        this.repo.countBooksByArchive(archiveId),
+        this.repo.countEnrichedBooksByArchive(archiveId),
+      ]);
+      await this.repo.updateArchive(archiveId, { status: 'complete', importedBooks: totalBooks, enrichedBooks: enrichedCount, errorMessage: null });
       this.progressStore.clear(archiveId);
-      this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: archive.importedBooks, enrichedBooks: enriched });
+      this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: totalBooks, enrichedBooks: enrichedCount });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} enriched=${enriched} failed=${failedBookIds.size} - enrichment completed`,
+        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} enriched=${enriched} failed=${failedBookIds.size} totalEnriched=${enrichedCount} - enrichment completed`,
       );
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
