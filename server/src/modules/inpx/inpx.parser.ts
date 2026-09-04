@@ -314,7 +314,7 @@ export class InpxParser {
         counts.skippedDel += 1;
         continue;
       }
-      const title = (fields[2] ?? '').trim();
+      const title = (fields[2] ?? '').trim().slice(0, 1000);
       if (!title) {
         counts.skippedEmptyTitle += 1;
         continue;
@@ -324,27 +324,32 @@ export class InpxParser {
         counts.skippedUnsupported += 1;
         continue;
       }
-      const fileId = (fields[6] ?? '').trim();
+      // structure.info field order: AUTHOR;GENRE;TITLE;SERIES;SERNO;FILE;SIZE;LIBID;DEL;EXT;DATE;
+      // INSNO;LANG;LIBRATE;KEYWORDS;YEAR;SOURCELIB
+      const fileId = (fields[5] ?? '').trim();
       if (!fileId) {
         counts.skippedNoFile += 1;
         continue;
       }
+      const rawSize = (fields[6] ?? '').trim();
+      const rawYear = (fields[15] ?? '').trim();
+      const year = toNullableNumber(rawYear);
 
       const language = (fields[12] ?? '').trim() || null;
       if (language) languages.add(language);
       counts.totalIndexedBooks += 1;
 
       records.push({
-        file: `fb2-${fileId}.${ext === 'fb2.zip' ? 'zip' : ext}`,
+        file: `${fileId}.${ext === 'fb2.zip' ? 'zip' : ext}`,
         format: ext === 'fb2.zip' ? 'fb2' : ext,
-        sizeBytes: null,
+        sizeBytes: rawSize ? toNullableNumber(rawSize) : null,
         title,
         authors: parseTextAuthors(fields[0] ?? ''),
         genres: this.resolveGenres(fields[1] ?? ''),
-        seriesName: (fields[3] ?? '').trim() || null,
-        seriesIndex: (fields[4] ?? '').trim() || null,
+        seriesName: (fields[3] ?? '').trim().slice(0, 500) || null,
+        seriesIndex: sanitizeSeriesIndex(fields[4] ?? ''),
         language,
-        publishedYear: toNullableNumber(fields[15]),
+        publishedYear: year != null && year >= 1000 && year <= 2200 ? year : null,
         fileId,
         sourceArchiveName: shardName,
         sourceArchivePath: null,
@@ -506,6 +511,12 @@ function looksLikeTextInp(buffer: Buffer): boolean {
   return buffer.length > 0 && buffer.includes(0x04) && (buffer.includes(0x0a) || buffer.includes(0x0d));
 }
 
+/** The DB only accepts numeric series numbers (`^[0-9]+([.][0-9]+)?$`); anything else becomes null. */
+function sanitizeSeriesIndex(raw: string): string | null {
+  const value = raw.trim();
+  return /^\d+(\.\d+)?$/.test(value) ? value : null;
+}
+
 /**
  * Flibusta text authors are "Last,First,Middle" per author, authors separated by commas, so three
  * fields per person. Odd leftovers (a missing middle name) are joined as one name rather than lost.
@@ -519,11 +530,11 @@ function parseTextAuthors(raw: string): string[] {
   for (let i = 0; i < parts.length;) {
     const rest = parts.slice(i);
     if (rest.length >= 3) {
-      const name = [rest[1], rest[2], rest[0]].filter(Boolean).join(' ');
+      const name = [rest[1], rest[2], rest[0]].filter(Boolean).join(' ').slice(0, 500);
       if (name) names.push(name);
       i += 3;
     } else {
-      const name = rest.join(' ');
+      const name = rest.join(' ').slice(0, 500);
       if (name) names.push(name);
       break;
     }

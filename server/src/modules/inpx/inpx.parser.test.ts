@@ -96,22 +96,24 @@ describe('InpxParser', () => {
   it('parses the Flibusta text catalog format and maps file ids to archive entries', async () => {
     const textIndex =
       'Громов,Александр,Николаевич\x04sf_social\x04Первый из могикан\x04Русская фантастика\x04\x04110119\x04511014\x04110119\x040\x04fb2\x042008-07-05\x041\x04ru\x043\x04\x042006\x04Flibusta\r\n' +
-      'Громов,Александр,Николаевич\x04sf_heroic\x04Звёздный мост\x04\x04\x04110125\x04356607\x04110125\x040\x04fb2\x042008-07-05\x042\x04ru\x044\x04\x042005\x04Flibusta\r\n';
+      'Громов,Александр,Николаевич\x04sf_heroic\x04Звёздный мост\x04\x04\x04110125\x04356607\x04110125\x040\x04fb2\x042008-07-05\x042\x04ru\x044\x04\x042005\x04Flibusta\r\n' +
+      'Пупкин,Вася,Иванович\x04det_classic\x04Пустой год\x04\x04\x0412345\x041234\x0412345\x040\x04fb2\x042020-01-01\x041\x04ru\x043\x04\x040\x04Flibusta\r\n';
     const archivePath = await buildInpxArchiveWithExtra(
       testRoot,
       [{ name: 'rus.inp', content: textIndex }],
       [
-        { name: 'fb2-511014.fb2', content: '<FictionBook/>' },
-        { name: 'fb2-356607.fb2', content: '<FictionBook/>' },
+        { name: '110119.fb2', content: '<FictionBook/>' },
+        { name: '110125.fb2', content: '<FictionBook/>' },
+        { name: '12345.fb2', content: '<FictionBook/>' },
       ],
     );
     const parser = new InpxParser();
 
     const result = await parser.parse(archivePath);
 
-    expect(result.totalIndexedBooks).toBe(2);
-    expect(result.books).toHaveLength(2);
-    const [first, second] = result.books;
+    expect(result.totalIndexedBooks).toBe(3);
+    expect(result.books).toHaveLength(3);
+    const [first, second, third] = result.books;
     expect(first.title).toBe('Первый из могикан');
     expect(first.authors).toEqual(['Александр Николаевич Громов']);
     expect(first.genres).toEqual(['Social Science Fiction']);
@@ -119,10 +121,14 @@ describe('InpxParser', () => {
     expect(first.seriesIndex).toBeNull();
     expect(first.language).toBe('ru');
     expect(first.publishedYear).toBe(2006);
-    expect(first.file).toBe('fb2-511014.fb2');
+    expect(first.file).toBe('110119.fb2');
+    expect(first.fileId).toBe('110119');
+    expect(first.sizeBytes).toBe(511014);
     expect(second.title).toBe('Звёздный мост');
     expect(second.seriesIndex).toBeNull();
     expect(second.publishedYear).toBe(2005);
+    // Empty YEAR must not become 0 and trip the DB's published_year check.
+    expect(third.publishedYear).toBeNull();
   });
 });
 

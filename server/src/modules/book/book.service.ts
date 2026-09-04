@@ -1465,7 +1465,7 @@ export class BookService {
     }
     const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId));
     const container = await getCachedInpxContainer(archivePath);
-    const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
+    const entry = findInpxContainerEntry(container, file.archiveEntryPath);
     if (!entry) throw new NotFoundException(`File ${file.bookId} not found in archive`);
     const originalFilename = basename(file.archiveEntryPath);
     return {
@@ -1497,7 +1497,7 @@ export class BookService {
     }
     const archivePath = file.sourceArchivePath ?? (await this.resolveInpxArchivePath(file.inpxArchiveId ?? null));
     const container = await getCachedInpxContainer(archivePath);
-    const entry = container.entries.find((candidate) => candidate.name === file.archiveEntryPath);
+    const entry = findInpxContainerEntry(container, file.archiveEntryPath);
     if (!entry) throw new NotFoundException('File not found in archive');
     return { container, entryName: entry.name, size: entry.size };
   }
@@ -3477,4 +3477,8 @@ export class BookService {
     }
     return chapters;
   }
+}
+
+function findInpxContainerEntry(container: InpxContainer, name: string): InpxContainer['entries'][number] | undefined {
+  return container.entries.find((candidate) => candidate.name === name) ?? container.entries.find((candidate) => candidate.name === `fb2-${name}`);
 }

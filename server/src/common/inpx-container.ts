@@ -23,9 +23,11 @@ const SEVENZIP_MAGIC = Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
 
 /**
  * 7z is expanded through a WASM module that holds the archive and its output in memory, so it
- * carries a much lower cap than the streaming ZIP path. Mirrors `release-archive.ts`.
+ * carries a hard practical cap. Flibusta companion shards are routinely larger than the 512 MB
+ * release-archive bound, so the INPX reader is more generous; very large archives still need a
+ * machine with enough RAM.
  */
-const MAX_SEVENZIP_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_SEVENZIP_ARCHIVE_BYTES = 2 * 1024 ** 3;
 
 /**
  * Opens an INPX container (ZIP or 7z) for listing and on-demand entry reads. The parser and the

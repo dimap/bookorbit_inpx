@@ -279,7 +279,7 @@ export class InpxImportService {
         nextIndex += 1;
         const startedAt = Date.now();
         try {
-          const buffer = await container.readEntry(entry.entryPath);
+          const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
           if (!buffer || buffer.length === 0) continue;
           const tempPath = join(tempDir, `book-${entry.bookId}.fb2`);
           await writeFile(tempPath, buffer);
