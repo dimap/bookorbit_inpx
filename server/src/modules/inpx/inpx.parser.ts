@@ -486,7 +486,7 @@ export class InpxParser {
   private resolveGenres(genreCsv: string | null): string[] {
     if (!genreCsv) return [];
     return splitCsv(genreCsv)
-      .map((code) => resolveFb2GenreName(code))
+      .map((code) => resolveFb2GenreName(code).slice(0, 200))
       .filter(Boolean);
   }
 

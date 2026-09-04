@@ -206,7 +206,7 @@ export class InpxRepository {
   }
 
   private async resolveAuthorIds(tx: Tx, names: string[]): Promise<Map<string, number>> {
-    const unique = [...new Set(names.filter(Boolean))];
+    const unique = [...new Set(names.filter((name) => name && name.length <= 500))];
     const byName = new Map<string, number>();
     if (unique.length === 0) return byName;
 
@@ -227,7 +227,7 @@ export class InpxRepository {
   }
 
   private async resolveGenreIds(tx: Tx, names: string[]): Promise<Map<string, number>> {
-    const unique = [...new Set(names.filter(Boolean))];
+    const unique = [...new Set(names.filter((name) => name && name.length <= 200))];
     const byName = new Map<string, number>();
     if (unique.length === 0) return byName;
 
