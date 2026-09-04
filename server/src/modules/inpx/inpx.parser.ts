@@ -517,29 +517,48 @@ function sanitizeSeriesIndex(raw: string): string | null {
   return /^\d+(\.\d+)?$/.test(value) ? value : null;
 }
 
+/** Strips the `First Middle: Last` colon artifact and collapses whitespace. */
+export function normalizeAuthorName(name: string): string {
+  return name.replace(/:\s*/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
 /**
- * Flibusta text authors are "Last,First,Middle" per author, authors separated by commas, so three
- * fields per person. Odd leftovers (a missing middle name) are joined as one name rather than lost.
+ * Flibusta text authors come in two shapes: `Last,First,Middle` (three comma fields per author) and
+ * the legacy `First Middle: Last` (one colon field per author). Both normalize to `First Middle Last`.
  */
 function parseTextAuthors(raw: string): string[] {
-  const parts = raw
+  const rawParts = raw
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean);
+  const usesColon = rawParts.some((part) => part.includes(':'));
+  const parts = rawParts.map((part) => normalizeAuthorName(part));
   const names: string[] = [];
+
+  if (usesColon) {
+    // "First Middle: Last" - every comma segment is already one complete author.
+    for (const part of parts) {
+      if (part) names.push(part.slice(0, 500));
+    }
+    return [...new Set(names)];
+  }
+
   for (let i = 0; i < parts.length;) {
-    const rest = parts.slice(i);
-    if (rest.length >= 3) {
-      const name = [rest[1], rest[2], rest[0]].filter(Boolean).join(' ').slice(0, 500);
+    if (i + 2 < parts.length) {
+      const name = [parts[i + 1], parts[i + 2], parts[i]].filter(Boolean).join(' ').slice(0, 500);
       if (name) names.push(name);
       i += 3;
-    } else {
-      const name = rest.join(' ').slice(0, 500);
+    } else if (i + 1 < parts.length) {
+      const name = [parts[i + 1], parts[i]].filter(Boolean).join(' ').slice(0, 500);
       if (name) names.push(name);
-      break;
+      i += 2;
+    } else {
+      const name = parts[i]!.slice(0, 500);
+      if (name) names.push(name);
+      i += 1;
     }
   }
-  return names;
+  return [...new Set(names)];
 }
 
 function splitCsv(value: string | null): string[] {

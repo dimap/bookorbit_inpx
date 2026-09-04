@@ -130,6 +130,28 @@ describe('InpxParser', () => {
     // Empty YEAR must not become 0 and trip the DB's published_year check.
     expect(third.publishedYear).toBeNull();
   });
+
+  it('normalizes the "First Middle: Last" colon author format', async () => {
+    const textIndex =
+      'Александр Сергеевич: Пушкин\x04det_classic\x04Капитанская дочка\x04\x04\x04555001\x04123456\x04555001\x040\x04fb2\x042022-01-01\x041\x04ru\x043\x04\x041836\x04Flibusta\r\n' +
+      'Лев Николаевич: Толстой,Фёдор Михайлович: Достоевский\x04prose_classic\x04Сборник\x04\x04\x04555002\x04999\x04555002\x040\x04fb2\x042022-01-01\x041\x04ru\x043\x04\x041900\x04Flibusta\r\n';
+    const archivePath = await buildInpxArchiveWithExtra(
+      testRoot,
+      [{ name: 'rus.inp', content: textIndex }],
+      [
+        { name: '555001.fb2', content: '<FictionBook/>' },
+        { name: '555002.fb2', content: '<FictionBook/>' },
+      ],
+    );
+    const parser = new InpxParser();
+
+    const result = await parser.parse(archivePath);
+
+    const [first, second] = result.books;
+    expect(first.authors).toEqual(['Александр Сергеевич Пушкин']);
+    expect(first.file).toBe('555001.fb2');
+    expect(second.authors).toEqual(['Лев Николаевич Толстой', 'Фёдор Михайлович Достоевский']);
+  });
 });
 
 function createInpxDatabase(dbPath: string): void {

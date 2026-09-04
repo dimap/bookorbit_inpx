@@ -85,6 +85,10 @@ export class InpxImportService {
     await this.repo.updateArchive(archiveId, { status: 'importing', errorMessage: null });
 
     try {
+      const fixedAuthors = await this.repo.fixColonAuthorNames();
+      if (fixedAuthors > 0) {
+        this.logger.log(`[${event}] [end] archiveId=${archiveId} fixedAuthorNames=${fixedAuthors} - legacy colon author names normalized`);
+      }
       const failedBookIds = new Set<number>();
       let enriched = 0;
       for (;;) {

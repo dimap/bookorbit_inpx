@@ -17,7 +17,7 @@ import {
   libraryFolders,
 } from '../../db/schema';
 import { SeriesIdentityService } from '../../common/services/series-identity.service';
-import { InpxBookRecord, normalizeEntryName } from './inpx.parser';
+import { InpxBookRecord, normalizeAuthorName, normalizeEntryName } from './inpx.parser';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -116,6 +116,43 @@ export class InpxRepository {
       .where(and(eq(bookFiles.inpxArchiveId, archiveId), isNull(bookMetadata.coverSource), isNotNull(bookFiles.archiveEntryPath)))
       .orderBy(bookFiles.id)
       .limit(limit);
+  }
+
+  /**
+   * Renames (or merges into) author rows whose name carries the `First Middle: Last` colon artifact
+   * imported before the text parser understood that format. Returns how many names changed.
+   */
+  async fixColonAuthorNames(): Promise<number> {
+    const rows = await this.db
+      .select({ id: authors.id, name: authors.name, sortName: authors.sortName })
+      .from(authors)
+      .where(sql`${authors.name} like '%:%'`);
+    let fixed = 0;
+
+    for (const row of rows) {
+      const fixedName = normalizeAuthorName(row.name);
+      if (!fixedName || fixedName === row.name) continue;
+
+      const [existing] = await this.db.select({ id: authors.id }).from(authors).where(eq(authors.name, fixedName)).limit(1);
+      if (existing) {
+        // Point the duplicate's links at the survivor, skipping books that already have it.
+        await this.db.execute(sql`
+          UPDATE book_authors AS ba
+          SET author_id = ${existing.id}
+          WHERE ba.author_id = ${row.id}
+            AND NOT EXISTS (SELECT 1 FROM book_authors AS x WHERE x.book_id = ba.book_id AND x.author_id = ${existing.id})
+        `);
+        await this.db.delete(authors).where(eq(authors.id, row.id));
+      } else {
+        await this.db
+          .update(authors)
+          .set({ name: fixedName, sortName: row.sortName ? normalizeAuthorName(row.sortName) : deriveSortName(fixedName) })
+          .where(eq(authors.id, row.id));
+      }
+      fixed += 1;
+    }
+
+    return fixed;
   }
 
   // ── Import ──────────────────────────────────────────────────────────────────
