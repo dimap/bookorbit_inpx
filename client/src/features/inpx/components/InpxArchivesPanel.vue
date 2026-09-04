@@ -183,7 +183,13 @@ function errMessage(err: unknown): string {
             <Play :size="13" aria-hidden="true" />
             {{ t('settings.admin.libraries.inpx.import') }}
           </Button>
-          <Button v-if="archive.importedBooks > 0" variant="outline" size="sm" :disabled="isBusy(archive.id)" @click="handleEnrich(archive)">
+          <Button
+            v-if="archive.importedBooks > 0 || archive.totalBooks > 0"
+            variant="outline"
+            size="sm"
+            :disabled="isBusy(archive.id)"
+            @click="handleEnrich(archive)"
+          >
             <Sparkles :size="13" aria-hidden="true" />
             {{ t('settings.admin.libraries.inpx.enrich') }}
           </Button>

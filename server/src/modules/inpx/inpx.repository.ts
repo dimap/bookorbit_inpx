@@ -31,6 +31,27 @@ export interface InpxImportChunkResult {
   bookEntries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[];
 }
 
+/**
+ * Archive rows with imported/enriched counts computed live from `book_files`, so idempotent
+ * re-imports that only skip existing books cannot leave a stale 0 behind.
+ */
+const archiveWithCounts = {
+  id: inpxArchives.id,
+  libraryId: inpxArchives.libraryId,
+  name: inpxArchives.name,
+  absolutePath: inpxArchives.absolutePath,
+  sizeBytes: inpxArchives.sizeBytes,
+  mtimeMs: inpxArchives.mtimeMs,
+  status: inpxArchives.status,
+  totalBooks: inpxArchives.totalBooks,
+  importedBooks: sql<number>`(select count(*)::int from ${bookFiles} bf where bf.inpx_archive_id = ${inpxArchives.id})`,
+  enrichedBooks: sql<number>`(select count(*)::int from ${bookFiles} bf join ${bookMetadata} bm on bm.book_id = bf.book_id where bf.inpx_archive_id = ${inpxArchives.id} and bm.cover_source is not null)`,
+  errorMessage: inpxArchives.errorMessage,
+  lastImportedAt: inpxArchives.lastImportedAt,
+  createdAt: inpxArchives.createdAt,
+  updatedAt: inpxArchives.updatedAt,
+};
+
 @Injectable()
 export class InpxRepository {
   constructor(
@@ -51,12 +72,12 @@ export class InpxRepository {
   }
 
   async findArchiveById(id: number): Promise<typeof inpxArchives.$inferSelect | null> {
-    const [row] = await this.db.select().from(inpxArchives).where(eq(inpxArchives.id, id)).limit(1);
+    const [row] = await this.db.select(archiveWithCounts).from(inpxArchives).where(eq(inpxArchives.id, id)).limit(1);
     return row ?? null;
   }
 
   async findArchivesByLibrary(libraryId: number): Promise<(typeof inpxArchives.$inferSelect)[]> {
-    return this.db.select().from(inpxArchives).where(eq(inpxArchives.libraryId, libraryId)).orderBy(inpxArchives.id);
+    return this.db.select(archiveWithCounts).from(inpxArchives).where(eq(inpxArchives.libraryId, libraryId)).orderBy(inpxArchives.id);
   }
 
   async createVirtualFolder(libraryId: number, path: string): Promise<number> {
