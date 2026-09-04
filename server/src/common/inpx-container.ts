@@ -1,8 +1,10 @@
-import { open, readFile, stat } from 'node:fs/promises';
-import { Readable } from 'node:stream';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createCbzZipEntryReadStream, extractCbzZipEntry, readCbzZipIndex, type CbzZipEntry } from './cbz-zip-reader';
-import { createSevenZipTempId, getSevenZip } from './sevenzip';
+import { extractSevenZipEntry, listSevenZipEntries } from './sevenzip-cli';
 
 export type InpxContainerKind = 'zip' | '7z';
 
@@ -20,14 +22,6 @@ export interface InpxContainer {
 }
 
 const SEVENZIP_MAGIC = Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
-
-/**
- * 7z is expanded through a WASM module that holds the archive and its output in memory, so it
- * carries a hard practical cap. Flibusta companion shards are routinely larger than the 512 MB
- * release-archive bound, so the INPX reader is more generous; very large archives still need a
- * machine with enough RAM.
- */
-const MAX_SEVENZIP_ARCHIVE_BYTES = 2 * 1024 ** 3;
 
 /**
  * Opens an INPX container (ZIP or 7z) for listing and on-demand entry reads. The parser and the
@@ -140,105 +134,43 @@ async function openZipContainerWithUnzipper(archivePath: string): Promise<InpxCo
 // ── 7z ────────────────────────────────────────────────────────────────────────
 
 async function openSevenZipContainer(archivePath: string): Promise<InpxContainer> {
-  const { size } = await stat(archivePath);
-  if (size > MAX_SEVENZIP_ARCHIVE_BYTES) {
-    throw new Error(
-      `INPX 7z archive is ${size} bytes, above the ${MAX_SEVENZIP_ARCHIVE_BYTES} byte limit supported for 7z; use a ZIP-format INPX archive instead`,
-    );
-  }
+  const listed = await listSevenZipEntries(archivePath);
+  const byName = new Map(listed.map((entry) => [normalizeEntryName(entry.name), entry]));
 
-  const sevenZip = await getSevenZip();
-  const workingDirectory = `/${createSevenZipTempId('inpx')}`;
-  const archiveName = `${workingDirectory}/archive.7z`;
-
-  try {
-    sevenZip.FS.mkdir(workingDirectory);
-    const bytes = new Uint8Array(await readFile(archivePath));
-    const fd = sevenZip.FS.open(archiveName, 'w+');
-    sevenZip.FS.write(fd, bytes, 0, bytes.length);
-    sevenZip.FS.close(fd);
-
-    try {
-      sevenZip.callMain(['x', archiveName, `-o${workingDirectory}/out`, '-y', '-p']);
-    } catch {
-      throw new Error('INPX 7z archive could not be extracted (it may be password protected)');
-    }
-
-    const collected = collectSevenZipEntries(sevenZip, `${workingDirectory}/out`, '');
-    const byName = new Map(collected.map((entry) => [normalizeEntryName(entry.relativePath), entry]));
-
-    return {
-      kind: '7z',
-      entries: [...byName.values()].map((entry) => ({ name: normalizeEntryName(entry.relativePath), size: entry.sizeBytes })),
-      readEntry: (name) => {
-        const entry = byName.get(normalizeEntryName(name));
-        if (!entry) return Promise.resolve(null);
-        return Promise.resolve(Buffer.from(sevenZip.FS.readFile(entry.path)));
-      },
-      readEntryStream: (name) => {
-        const entry = byName.get(normalizeEntryName(name));
-        if (!entry) return Promise.resolve(null);
-        const buffer = Buffer.from(sevenZip.FS.readFile(entry.path));
-        return Promise.resolve({ stream: Readable.from(buffer), size: buffer.length });
-      },
-      close: () => Promise.resolve(removeSevenZipDirectory(sevenZip, workingDirectory)),
-    };
-  } catch (err) {
-    removeSevenZipDirectory(sevenZip, workingDirectory);
-    throw err;
-  }
-}
-
-function collectSevenZipEntries(
-  sevenZip: Awaited<ReturnType<typeof getSevenZip>>,
-  path: string,
-  relativePath: string,
-): Array<{ relativePath: string; path: string; sizeBytes: number }> {
-  const collected: Array<{ relativePath: string; path: string; sizeBytes: number }> = [];
-  let names: string[];
-  try {
-    names = sevenZip.FS.readdir(path).filter((name) => name !== '.' && name !== '..');
-  } catch {
-    return collected;
-  }
-
-  for (const name of names) {
-    const child = `${path}/${name}`;
-    const childRelative = relativePath ? `${relativePath}/${name}` : name;
-    try {
-      const stats = sevenZip.FS.stat(child);
-      if (sevenZip.FS.isDir(stats.mode)) {
-        collected.push(...collectSevenZipEntries(sevenZip, child, childRelative));
-        continue;
+  return {
+    kind: '7z',
+    entries: [...byName.values()].map((entry) => ({ name: normalizeEntryName(entry.name), size: entry.size })),
+    readEntry: async (name) => {
+      const entry = byName.get(normalizeEntryName(name)) ?? byName.get(`fb2-${normalizeEntryName(name)}`);
+      if (!entry) return null;
+      const outDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-7z-'));
+      try {
+        const target = await extractSevenZipEntry(archivePath, entry.name, outDir);
+        if (!target) return null;
+        return readFile(target);
+      } finally {
+        await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
       }
-      collected.push({ relativePath: childRelative, path: child, sizeBytes: stats.size });
-    } catch {
-      continue;
-    }
-  }
-  return collected;
-}
-
-function removeSevenZipDirectory(sevenZip: Awaited<ReturnType<typeof getSevenZip>>, path: string): void {
-  let names: string[];
-  try {
-    names = sevenZip.FS.readdir(path).filter((name) => name !== '.' && name !== '..');
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    const child = `${path}/${name}`;
-    try {
-      sevenZip.FS.unlink(child);
-    } catch {
-      removeSevenZipDirectory(sevenZip, child);
-    }
-  }
-  try {
-    sevenZip.FS.rmdir(path);
-  } catch {
-    // best effort
-  }
+    },
+    readEntryStream: async (name) => {
+      const entry = byName.get(normalizeEntryName(name)) ?? byName.get(`fb2-${normalizeEntryName(name)}`);
+      if (!entry) return null;
+      const outDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-7z-'));
+      const target = await extractSevenZipEntry(archivePath, entry.name, outDir);
+      if (!target) {
+        await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+        return null;
+      }
+      const stream = createReadStream(target);
+      const cleanup = (): void => {
+        void rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+      };
+      stream.on('close', cleanup);
+      stream.on('error', cleanup);
+      return { stream, size: entry.size };
+    },
+    close: () => Promise.resolve(),
+  };
 }
 
 export function normalizeEntryName(name: string): string {

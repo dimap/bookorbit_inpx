@@ -1,9 +1,11 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
 import { openInpxContainer } from '../../common/inpx-container';
+import { extractSevenZipAll } from '../../common/sevenzip-cli';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
@@ -267,11 +269,17 @@ export class InpxImportService {
     entries: { bookId: number; entryPath: string }[],
     onProgress: (processed: number) => void,
   ): Promise<number> {
-    const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-inpx-enrich-'));
+    const tempDir = await mkdtemp(join(enrichTempBase(), 'inpx-enrich-'));
     const container = await openInpxContainer(archivePath);
     let nextIndex = 0;
     let enriched = 0;
     let failed = 0;
+    const isSevenZip = container.kind === '7z';
+    if (isSevenZip) {
+      // Solid 7z shards decompress the whole block to reach one file, so extract the shard once and
+      // read its entries from disk instead of spawning a 7z process per book.
+      await extractSevenZipAll(archivePath, tempDir);
+    }
 
     const worker = async (): Promise<void> => {
       while (nextIndex < entries.length) {
@@ -279,15 +287,23 @@ export class InpxImportService {
         nextIndex += 1;
         const startedAt = Date.now();
         try {
-          const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
-          if (!buffer || buffer.length === 0) continue;
-          const tempPath = join(tempDir, `book-${entry.bookId}.fb2`);
-          await writeFile(tempPath, buffer);
+          let fb2Path: string | null = null;
+          if (isSevenZip) {
+            fb2Path =
+              [entry.entryPath, `fb2-${entry.entryPath}`].map((name) => join(tempDir, basename(name))).find((path) => existsSync(path)) ?? null;
+          } else {
+            const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
+            if (buffer && buffer.length > 0) {
+              fb2Path = join(tempDir, `book-${entry.bookId}.fb2`);
+              await writeFile(fb2Path, buffer);
+            }
+          }
+          if (!fb2Path) continue;
           try {
-            await this.metadataService.extractAndSave(entry.bookId, tempPath, 'fb2');
+            await this.metadataService.extractAndSave(entry.bookId, fb2Path, 'fb2');
             enriched += 1;
           } finally {
-            await rm(tempPath, { force: true }).catch(() => undefined);
+            if (!isSevenZip) await rm(fb2Path, { force: true }).catch(() => undefined);
           }
         } catch (err) {
           failed += 1;
@@ -323,4 +339,10 @@ function chunkArray<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+/** Enrichment extracts whole 7z shards to disk; use the persistent data volume, not the tmpfs. */
+function enrichTempBase(): string {
+  const dataPath = process.env.APP_DATA_PATH;
+  return dataPath && dataPath !== '' ? dataPath : tmpdir();
 }
