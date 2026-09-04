@@ -86,17 +86,35 @@ export async function extractSevenZipAll(archivePath: string, outDir: string): P
   await run7z(binary, ['x', archivePath, `-o${outDir}`, '-y']);
 }
 
+/**
+ * Parses `7z l -slt` output. The `----------` separator appears per solid block, not per file, so
+ * the parser walks lines and pairs every `Path =` with the `Size =` that follows it.
+ */
 export function parseSevenZipList(stdout: string): SevenZipCliEntry[] {
   const entries: SevenZipCliEntry[] = [];
-  for (const block of stdout.split('----------')) {
-    if (/^\s*Folder = \+$/m.test(block)) continue;
-    const pathMatch = block.match(/^\s*Path = (.+)$/m);
-    const sizeMatch = block.match(/^\s*Size = (\d+)$/m);
-    if (!pathMatch || !sizeMatch) continue;
-    const name = pathMatch[1]!.trim();
-    const size = Number(sizeMatch[1]);
-    if (!name || name.endsWith('/') || !Number.isFinite(size)) continue;
-    entries.push({ name, size });
+  let inFiles = false;
+  let currentName: string | null = null;
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (line.startsWith('----------')) {
+      inFiles = true;
+      continue;
+    }
+    if (!inFiles) continue;
+
+    const pathMatch = /^\s*Path = (.+)$/.exec(line);
+    if (pathMatch) {
+      currentName = pathMatch[1]!.trim();
+      continue;
+    }
+    const sizeMatch = /^\s*Size = (\d+)$/.exec(line);
+    if (sizeMatch && currentName) {
+      const name = currentName;
+      currentName = null;
+      if (name && !name.endsWith('/')) entries.push({ name, size: Number(sizeMatch[1]) });
+    }
   }
+
   return entries;
 }
