@@ -2,9 +2,10 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { readdirSync } from 'node:fs';
 import { rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { XMLParser } from 'fast-xml-parser';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
-import { openInpxContainer } from '../../common/inpx-container';
+import { getCachedInpxContainer, openInpxContainer, type InpxContainer } from '../../common/inpx-container';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
@@ -18,6 +19,14 @@ const PROGRESS_EMIT_EVERY = 10;
 
 /** Companion archives whose entry layout has already been logged this process run. */
 const inspectedArchives = new Set<number>();
+
+interface SidecarArchive {
+  start: number;
+  end: number;
+  path: string;
+}
+
+const sidecarArchiveCache = new Map<string, SidecarArchive[]>();
 
 @Injectable()
 export class InpxImportService {
@@ -353,6 +362,13 @@ export class InpxImportService {
           if (!buffer || buffer.length === 0) continue;
           const format = detectBookFormat(buffer);
           if (!format) continue;
+          if (format === '7z') {
+            // FLibrary variant: the "epub" is a 7z whose cover image lives in a sidecar archive.
+            const fileId = basename(entry.entryPath).replace(/\.[^.]+$/, '');
+            const saved = await this.extractFlibraryCover(entry.bookId, fileId, buffer, dirname(archivePath), archivePath);
+            if (saved) enriched += 1;
+            continue;
+          }
           tempPath = join(tmpdir(), `inpx-book-${entry.bookId}.${format}`);
           await writeFile(tempPath, buffer);
           await this.metadataService.extractAndSave(entry.bookId, tempPath, format);
@@ -384,6 +400,115 @@ export class InpxImportService {
     }
     return { enriched, failedBookIds: [...failedBookIds] };
   }
+
+  /**
+   * FLibrary books are 7z archives whose cover image lives in a sidecar archive (`covers/` or
+   * `images/` next to the book archives). The cover path is read from the EPUB's OPF inside the 7z.
+   */
+  private async extractFlibraryCover(bookId: number, fileId: string, bookBuffer: Buffer, baseDir: string, bookArchivePath: string): Promise<boolean> {
+    const tempPath = join(tmpdir(), `inpx-epub-${bookId}.7z`);
+    await writeFile(tempPath, bookBuffer);
+    try {
+      const container = await openInpxContainer(tempPath);
+      try {
+        const opfEntry = container.entries.find((entry) => /content\.opf$/i.test(entry.name));
+        if (!opfEntry) {
+          this.logger.debug(`[inpx.enrich] [skip] bookId=${bookId} reason="no content.opf in epub"`);
+          return false;
+        }
+        const opfXml = (await container.readEntry(opfEntry.name))?.toString('utf8');
+        const coverHref = opfXml ? findOpfCoverPath(opfXml) : null;
+        if (!coverHref) {
+          this.logger.debug(`[inpx.enrich] [skip] bookId=${bookId} reason="no cover meta in opf"`);
+          return false;
+        }
+        const coverBytes = await this.readCoverFromSidecar(baseDir, fileId, basename(coverHref), bookArchivePath);
+        if (!coverBytes) {
+          this.logger.debug(
+            `[inpx.enrich] [skip] bookId=${bookId} fileId=${fileId} cover="${sanitizeLogValue(basename(coverHref))}" - cover not found in sidecar`,
+          );
+          return false;
+        }
+        await this.metadataService.saveExtractedCoverBytes(bookId, coverBytes);
+        return true;
+      } finally {
+        await container.close();
+      }
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async readCoverFromSidecar(baseDir: string, fileId: string, coverName: string, bookArchivePath: string): Promise<Buffer | null> {
+    const archive = this.findSidecarArchive(baseDir, fileId);
+    const candidates = [
+      coverName,
+      `${fileId}.jpg`,
+      `${fileId}.jpeg`,
+      `${fileId}.png`,
+      `${fileId}.webp`,
+      `${fileId}.gif`,
+      `${fileId}.jxl`,
+      `fb2-${fileId}.jpg`,
+      `fb2-${fileId}.jpeg`,
+      `fb2-${fileId}.png`,
+      `fb2-${fileId}.jxl`,
+    ];
+    if (archive) {
+      const container = await getCachedInpxContainer(archive.path);
+      const bytes = await readCandidateCover(container, candidates, coverName);
+      if (bytes) return bytes;
+    }
+    // Fallback: the images may live in the book archive itself rather than a sidecar folder.
+    if (bookArchivePath !== baseDir) {
+      const container = await getCachedInpxContainer(bookArchivePath);
+      const bytes = await readCandidateCover(container, candidates, coverName);
+      if (bytes) return bytes;
+    }
+    return null;
+  }
+
+  private findSidecarArchive(baseDir: string, fileId: string): SidecarArchive | null {
+    const archives = sidecarArchiveCache.get(baseDir) ?? this.discoverSidecarArchives(baseDir);
+    const id = Number.parseInt(fileId, 10);
+    if (!Number.isFinite(id)) return null;
+    for (const archive of archives) {
+      if (id >= archive.start && id <= archive.end) return archive;
+    }
+    return null;
+  }
+
+  private discoverSidecarArchives(baseDir: string): SidecarArchive[] {
+    const archives: SidecarArchive[] = [];
+    const scanDir = (dir: string): void => {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        const match = /(?:[a-z]\.)?fb2-(\d+)-(\d+)\.(?:zip|7z)$/i.exec(name);
+        if (!match) continue;
+        archives.push({ start: Number(match[1]), end: Number(match[2]), path: join(dir, name) });
+      }
+    };
+    scanDir(baseDir);
+    scanDir(join(baseDir, 'covers'));
+    scanDir(join(baseDir, 'images'));
+    scanDir(join(baseDir, 'cover'));
+    scanDir(join(baseDir, 'img'));
+    archives.sort((a, b) => a.start - b.start);
+    sidecarArchiveCache.set(baseDir, archives);
+    const sample = archives
+      .slice(0, 5)
+      .map((archive) => archive.path)
+      .join(', ');
+    this.logger.log(
+      `[inpx.sidecar] [end] base="${sanitizeLogValue(baseDir)}" archives=${archives.length} sample="${sanitizeLogValue(sample)}" - sidecar cover/image archives discovered`,
+    );
+    return archives;
+  }
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -394,11 +519,70 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-/** Sniffs the first bytes: `PK` is a ZIP (EPUB), `<?`/BOM is XML (FB2). */
-function detectBookFormat(buffer: Buffer): 'fb2' | 'epub' | null {
+/** Sniffs the first bytes: `PK` is a ZIP (EPUB), `37 7a bc af` is a 7z FLibrary "epub", `<?`/BOM is FB2. */
+function detectBookFormat(buffer: Buffer): 'fb2' | 'epub' | '7z' | null {
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return 'epub';
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x37 &&
+    buffer[1] === 0x7a &&
+    buffer[2] === 0xbc &&
+    buffer[3] === 0xaf &&
+    buffer[4] === 0x27 &&
+    buffer[5] === 0x1c
+  ) {
+    return '7z';
+  }
   if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'fb2';
   if (buffer.length >= 1 && buffer[0] === 0x3c) return 'fb2';
+  return null;
+}
+
+async function readCandidateCover(container: InpxContainer, candidates: string[], coverName: string): Promise<Buffer | null> {
+  for (const candidate of candidates) {
+    if (!container.entries.some((entry) => entry.name === candidate)) continue;
+    const bytes = await container.readEntry(candidate);
+    if (bytes && bytes.length > 0) return bytes;
+  }
+  for (const entry of container.entries) {
+    if (basename(entry.name) === coverName) {
+      const bytes = await container.readEntry(entry.name);
+      if (bytes && bytes.length > 0) return bytes;
+    }
+  }
+  return null;
+}
+
+/** Reads the cover file href from an EPUB2 OPF (`<meta name="cover" content="id"/>` + manifest item). */
+function findOpfCoverPath(opfXml: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = new XMLParser({ ignoreAttributes: false }).parse(opfXml);
+  } catch {
+    return null;
+  }
+  const pkg = (parsed as { package?: Record<string, unknown> })?.package;
+  if (!pkg) return null;
+  const metadata = pkg.metadata as { meta?: unknown } | undefined;
+  let coverId: string | null = null;
+  if (metadata?.meta) {
+    const metas = Array.isArray(metadata.meta) ? metadata.meta : [metadata.meta];
+    for (const meta of metas) {
+      const m = meta as { '@_name'?: string; '@_content'?: string };
+      if (m['@_name'] === 'cover') {
+        coverId = m['@_content'] ?? null;
+        break;
+      }
+    }
+  }
+  if (!coverId) return null;
+  const manifest = pkg.manifest as { item?: unknown } | undefined;
+  if (!manifest?.item) return null;
+  const items = Array.isArray(manifest.item) ? manifest.item : [manifest.item];
+  for (const item of items) {
+    const it = item as { '@_id'?: string; '@_href'?: string };
+    if (it['@_id'] === coverId) return it['@_href'] ?? null;
+  }
   return null;
 }
 
