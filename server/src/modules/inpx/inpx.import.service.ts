@@ -1,16 +1,20 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { readdirSync } from 'node:fs';
-import { rm, stat } from 'node:fs/promises';
+import { rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
 import { openInpxContainer } from '../../common/inpx-container';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { MetadataService } from '../metadata/metadata.service';
 import { InpxGateway } from './inpx.gateway';
 import { InpxProgressStore } from './inpx-progress.store';
 import type { InpxBookRecord } from './inpx.parser';
 import { InpxParser } from './inpx.parser';
 import { INPX_BOOKS_CHUNK_SIZE, InpxRepository } from './inpx.repository';
+
+const ENRICH_CONCURRENCY = 4;
+const PROGRESS_EMIT_EVERY = 10;
 
 /** Companion archives whose entry layout has already been logged this process run. */
 const inspectedArchives = new Set<number>();
@@ -23,6 +27,7 @@ export class InpxImportService {
   constructor(
     private readonly parser: InpxParser,
     private readonly repo: InpxRepository,
+    private readonly metadataService: MetadataService,
     private readonly gateway: InpxGateway,
     private readonly progressStore: InpxProgressStore,
   ) {}
@@ -80,12 +85,30 @@ export class InpxImportService {
     await this.repo.updateArchive(archiveId, { status: 'importing', errorMessage: null });
 
     try {
-      // Book content is never unpacked for metadata: the index already carries title, authors,
-      // genres, series and year, and covers live in separate archives. This pass only repairs the
-      // author names imported before the text format was understood.
       const fixedAuthors = await this.repo.fixColonAuthorNames();
       if (fixedAuthors > 0) {
         this.logger.log(`[${event}] [end] archiveId=${archiveId} fixedAuthorNames=${fixedAuthors} - legacy colon author names normalized`);
+      }
+
+      // Covers and descriptions live inside the books (their image references point at the separate
+      // image archives), so each book is read one at a time - never a whole shard - to keep disk
+      // use to a single file.
+      const failedBookIds = new Set<number>();
+      let enriched = 0;
+      for (;;) {
+        const files = await this.repo.findUnenrichedBookFiles(archiveId, 500);
+        const pending = files.filter((file) => !failedBookIds.has(file.bookId));
+        if (pending.length === 0) break;
+
+        progress.total += pending.length;
+        this.progressStore.set(progress);
+        const result = await this.enrichEntries(archive.absolutePath, pending, (count) => {
+          progress.processed = count;
+          this.progressStore.set(progress);
+          if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
+        });
+        enriched += result.enriched;
+        for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
       }
 
       const [totalBooks, enrichedCount] = await Promise.all([
@@ -96,7 +119,7 @@ export class InpxImportService {
       this.progressStore.clear(archiveId);
       this.gateway.emitCompleted({ archiveId, libraryId, importedBooks: totalBooks, enrichedBooks: enrichedCount });
       this.logger.log(
-        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} fixedAuthorNames=${fixedAuthors} totalEnriched=${enrichedCount} - enrichment completed`,
+        `[${event}] [end] archiveId=${archiveId} durationMs=${Date.now() - startedAt} fixedAuthorNames=${fixedAuthors} enriched=${enriched} failed=${failedBookIds.size} totalEnriched=${enrichedCount} - enrichment completed`,
       );
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -273,6 +296,94 @@ export class InpxImportService {
       );
     }
   }
+
+  /**
+   * Reads each book's file one at a time (never a whole shard, so disk stays at a single file) and
+   * lets the standard metadata pipeline extract cover, description and other fields. The index `EXT`
+   * does not always match the real file, so the format is sniffed from the content.
+   */
+  private async enrichEntries(
+    inpxPath: string,
+    entries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[],
+    onProgress: (processed: number) => void,
+  ): Promise<{ enriched: number; failedBookIds: number[] }> {
+    const groups = new Map<string, { bookId: number; entryPath: string }[]>();
+    for (const entry of entries) {
+      const key = entry.sourceArchivePath ?? inpxPath;
+      let list = groups.get(key);
+      if (!list) {
+        list = [];
+        groups.set(key, list);
+      }
+      list.push({ bookId: entry.bookId, entryPath: entry.entryPath });
+    }
+
+    let enriched = 0;
+    const failedBookIds = new Set<number>();
+    let runningTotal = 0;
+    for (const [archivePath, groupEntries] of groups) {
+      const result = await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
+        onProgress(runningTotal + localProcessed);
+      });
+      enriched += result.enriched;
+      for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
+      runningTotal += groupEntries.length;
+    }
+    return { enriched, failedBookIds: [...failedBookIds] };
+  }
+
+  private async enrichFromContainer(
+    archivePath: string,
+    entries: { bookId: number; entryPath: string }[],
+    onProgress: (processed: number) => void,
+  ): Promise<{ enriched: number; failedBookIds: number[] }> {
+    const container = await openInpxContainer(archivePath);
+    let nextIndex = 0;
+    let enriched = 0;
+    const failedBookIds = new Set<number>();
+
+    const worker = async (): Promise<void> => {
+      while (nextIndex < entries.length) {
+        const entry = entries[nextIndex]!;
+        nextIndex += 1;
+        const startedAt = Date.now();
+        let tempPath: string | null = null;
+        try {
+          const buffer = (await container.readEntry(entry.entryPath)) ?? (await container.readEntry(`fb2-${entry.entryPath}`));
+          if (!buffer || buffer.length === 0) continue;
+          const format = detectBookFormat(buffer);
+          if (!format) continue;
+          tempPath = join(tmpdir(), `inpx-book-${entry.bookId}.${format}`);
+          await writeFile(tempPath, buffer);
+          await this.metadataService.extractAndSave(entry.bookId, tempPath, format);
+          enriched += 1;
+        } catch (err) {
+          failedBookIds.add(entry.bookId);
+          const error = err instanceof Error ? err : new Error(String(err));
+          const errorMessage = sanitizeLogValue(error.message);
+          this.logger.warn(
+            `[inpx.enrich] [fail] bookId=${entry.bookId} durationMs=${Date.now() - startedAt} errorClass=${error.name} error="${errorMessage}" - enrichment failed`,
+          );
+        } finally {
+          if (tempPath) await rm(tempPath, { force: true }).catch(() => undefined);
+        }
+        onProgress(Math.min(nextIndex, entries.length));
+      }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
+    } finally {
+      await container.close();
+    }
+
+    if (failedBookIds.size > 0) {
+      this.logger.warn(
+        `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failedBookIds.size} - enrichment completed with failures`,
+      );
+    }
+    return { enriched, failedBookIds: [...failedBookIds] };
+  }
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -281,6 +392,14 @@ function chunkArray<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+/** Sniffs the first bytes: `PK` is a ZIP (EPUB), `<?`/BOM is XML (FB2). */
+function detectBookFormat(buffer: Buffer): 'fb2' | 'epub' | null {
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return 'epub';
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'fb2';
+  if (buffer.length >= 1 && buffer[0] === 0x3c) return 'fb2';
+  return null;
 }
 
 /** Enrichment extracts whole 7z shards to disk; use the persistent data volume, not the tmpfs. */
