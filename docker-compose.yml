@@ -55,6 +55,9 @@ services:
     container_name: bookorbit-db
     image: pgvector/pgvector:pg18
     restart: unless-stopped
+    # Docker's default /dev/shm is 64 MB, which Postgres parallel workers exhaust on heavy
+    # catalog queries (series page, counts) and abort with "could not resize shared memory segment".
+    shm_size: '1gb'
     environment:
       POSTGRES_USER: ${POSTGRES_USER?required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD?required}
