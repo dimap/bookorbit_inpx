@@ -5,6 +5,8 @@
 A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and comics, with added
 support for **INPX archive catalogs** (Flibusta / FLibrary / FlibRusEc).
 
+## ATTENTION! This project was created as a proof-of-concept and is currently under development. It is not recommended for regular use. Alternative projects such as [inpx-library](https://github.com/Habsaec/inpx-library-server) or [inpx-web](https://github.com/bookpauk/inpx-web) handle this task better. If you decide to use it anyway, expect bugs.
+
 **English** | [Русский](README.ru.md)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square&color=B461B3)](LICENSE)
