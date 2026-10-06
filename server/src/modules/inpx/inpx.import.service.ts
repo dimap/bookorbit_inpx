@@ -4,7 +4,7 @@ import { rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
-import { openInpxContainer, type InpxContainer } from '../../common/inpx-container';
+import { getCachedInpxContainer, openInpxContainer, type InpxContainer } from '../../common/inpx-container';
 import { htmlToPlainText } from '../../common/utils/html-to-text.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
@@ -462,9 +462,10 @@ export class InpxImportService {
   private async readAnnotationShard(libraryRoot: string, bookArchivePath: string): Promise<string> {
     const annotationsPath = resolveAnnotationsArchivePath(libraryRoot);
     if (!annotationsPath) return '';
-    let container: InpxContainer | null = null;
     try {
-      container = await openInpxContainer(annotationsPath);
+      // The same `etc/annotations.7z` serves every companion shard, so keep its container cached
+      // instead of re-listing the whole archive for each shard.
+      const container = await getCachedInpxContainer(annotationsPath);
       for (const internal of annotationInternalCandidates(bookArchivePath)) {
         const buffer = await container.readEntry(internal);
         if (buffer && buffer.length > 0) return buffer.toString('utf8');
@@ -476,8 +477,6 @@ export class InpxImportService {
         `[inpx.sidecar] [fail] action=annotations archive="${sanitizeLogValue(annotationsPath)}" errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - annotation shard could not be read`,
       );
       return '';
-    } finally {
-      if (container) await container.close();
     }
   }
 }
