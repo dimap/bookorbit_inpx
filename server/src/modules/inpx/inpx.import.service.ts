@@ -8,6 +8,7 @@ import { getCachedInpxContainer, openInpxContainer, type InpxContainer } from '.
 import { htmlToPlainText } from '../../common/utils/html-to-text.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
+import { InpxAuthorSidecarService } from './inpx-author-sidecar.service';
 import {
   annotationFolderCandidates,
   annotationInternalCandidates,
@@ -39,6 +40,7 @@ export class InpxImportService {
     private readonly metadataService: MetadataService,
     private readonly gateway: InpxGateway,
     private readonly progressStore: InpxProgressStore,
+    private readonly authorSidecar: InpxAuthorSidecarService,
   ) {}
 
   getProgress(archiveId: number): InpxImportProgressEvent | undefined {
@@ -125,6 +127,10 @@ export class InpxImportService {
           processedBookIds.add(bookId);
         }
       }
+
+      // Flibusta/FLibrary binds books to authors by name, and the author sidecars are keyed by
+      // MD5(name); index them once per library so author pages can resolve portraits and bios lazily.
+      await this.authorSidecar.buildIndex(libraryId, libraryRoot);
 
       const [totalBooks, enrichedCount] = await Promise.all([
         this.repo.countBooksByArchive(archiveId),

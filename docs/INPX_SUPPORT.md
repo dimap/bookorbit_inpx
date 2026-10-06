@@ -17,8 +17,9 @@ a multi-hundred-GB Flibusta library on disk exactly once.
 
 - The feature is implemented end to end (backend + client) and merged into `main` in the fork
   `dimap/bookorbit_inpx` (remote `fork`). Development continues on `feat/inpx-support`.
-- DB migrations `0086_add-inpx.sql` and `0087_add-inpx-source-archive.sql` were generated with
-  Drizzle Kit. The server applies them automatically on container start.
+- DB migrations `0086_add-inpx.sql`, `0087_add-inpx-source-archive.sql`, and
+  `0088_add-inpx-author-sidecars.sql` were generated with Drizzle Kit. The server applies them
+  automatically on container start.
 - Tests, typecheck, lint all pass; the only failures seen are pre-existing Windows issues in
   `book.service.test.ts` (4) and `file-watcher.service.test.ts` (1) that exist without these
   changes too.
@@ -42,6 +43,15 @@ One row per registered archive. Fields: `id`, `libraryId` (FK cascade), `name`, 
 Constraints: `book_files_inpx_entry_chk` requires an `inpx` row to carry both
 `archiveEntryPath` and `inpxArchiveId`.
 
+### New table `inpx_author_sidecars` (`server/src/db/schema/inpx.ts`)
+
+One row per Flibusta/FLibrary author key in a library. Fields: `id`, `libraryId` (FK cascade),
+`authorKey` (varchar 64, lowercase MD5 of the normalized author name), `libraryRoot`, `bioShardName`,
+`bioEntryPath`, `portraitShardName`, `portraitEntryPath`, timestamps. Unique on
+`(libraryId, authorKey)`; indexed on `libraryId`. Built once per library by listing
+`etc/authors/*.zip|7z` and `etc/authors/pictures/*.zip|7z`; the bio/portrait bytes are read lazily
+when an author page is opened.
+
 ### Virtual library folders
 
 Each archive gets a virtual `library_folders` row whose `path` is `inpx://<archiveId>`. Books
@@ -61,7 +71,7 @@ The scanner and file watcher skip virtual folders so INPX books are never marked
 | `fb2-genres.ts`          | FB2 genre code -> human-readable name map (`FB2_GENRE_NAMES`, `resolveFb2GenreName`). Unknown codes are prettified.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `inpx.repository.ts`     | Archive CRUD, virtual folder helpers, `importBooksChunked()` (chunked, transactional, idempotent via `onConflictDoNothing` on `(libraryId, folderPath)`). Constants: `INPX_BOOKS_CHUNK_SIZE = 300`.                                                                                                                                                                                                                                                                                                                                                                      |
 | `inpx.import.service.ts` | Background import. Phase 1 `index` inserts books from the index; phase 2 `enrich` reads each book file one at a time (real format sniffed from bytes), then reads the cover from the Flibusta/FLibrary sidecar `covers/` archive and the description from `etc/annotations.7z`, falling back to `MetadataService.extractAndSave` for FB2/EPUB. The enrich loop records every attempted book so it always drains, even when a book genuinely has no cover. Bounded concurrency 4, per-book failure is logged and skipped. `startImport()` is re-entrant (shares one run). |
-| `inpx.sidecar.ts`        | Pure helpers for the Flibusta/FLibrary sidecar layout: stem variants (`f.fb2-*` / `fb2-*`), `resolveCoverArchivePath`, `resolveAnnotationsArchivePath`, cover entry candidates, and annotation XML parsing.                                                                                                                                                                                                                                                                                                                                                              |
+| `inpx.sidecar.ts`        | Pure helpers for the Flibusta/FLibrary sidecar layout: stem variants (`f.fb2-*` / `fb2-*`), `resolveCoverArchivePath`, `resolveAnnotationsArchivePath`, cover entry candidates, annotation XML parsing, and the author MD5 key candidates (`md5AuthorKeyCandidates`, `authorEntryKeyFromPath`).                                                                                                                                                                                                                                                                          |
 | `inpx.service.ts`        | Orchestration: `register`, `list`, `get`, `import`, `remove`. Validates the path (absolute, `.inpx`, exists, is file). Removing an archive deletes its books (cascade) then the archive and its virtual folder.                                                                                                                                                                                                                                                                                                                                                          |
 | `inpx.controller.ts`     | Routes below. `register`/`import`/`remove` are gated by `Permission.LibraryUpload` + `RequireLibraryAccess('editor')`; `list`/`get` by `RequireLibraryAccess('viewer')`.                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `inpx.gateway.ts`        | WebSocket namespace `/inpx`, events `inpx:progress` and `inpx:completed`, auth like `scan.gateway`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -75,18 +85,24 @@ The scanner and file watcher skip virtual folders so INPX books are never marked
 3. **Index phase**: `InpxParser.parse()` reads all `.inp` files; books are inserted in chunks of 300,
    each chunk in its own transaction. Authors/genres are upserted by name, series via
    `SeriesIdentityService`. Progress is emitted per chunk.
-4. **Enrich phase**: for each newly created book, the FB2 entry is extracted to a temp file and
-   `metadataService.extractAndSave(bookId, tempPath, 'fb2')` runs; the temp file is removed. 4
-   workers, progress emitted every 10 items and at the end.
-5. Archive row is marked `complete` (or `failed` with `errorMessage`); `inpx:completed` is emitted.
+4. **Enrich phase**: for each book with no cover yet, the real format is sniffed from the bytes; the
+   cover comes from the sidecar `covers/` archive and the description from `etc/annotations.7z`, with
+   `metadataService.extractAndSave` filling the rest from FB2/EPUB. 4 workers, progress emitted every
+   10 items and at the end. The pass records every attempted book, so a coverless book is not retried
+   forever.
+5. **Author index**: once per library, `InpxAuthorSidecarService.buildIndex()` lists
+   `etc/authors/*.zip|7z` and `etc/authors/pictures/*.zip|7z` and stores MD5(author name) -> shard /
+   entry rows in `inpx_author_sidecars`. Portraits and bios are then read lazily when an author page is
+   opened (`AuthorsService.findOne` / `getImagePath`).
+6. Archive row is marked `complete` (or `failed` with `errorMessage`); `inpx:completed` is emitted.
 
 Idempotency: re-running the import skips books whose `folderPath` already exists, so a partial run
 resumes instead of duplicating.
 
-### Sidecar enrichment (`covers/`, `etc/annotations.7z`)
+### Sidecar enrichment (`covers/`, `etc/annotations.7z`, `etc/authors/`)
 
-Flibusta/FLibrary mirrors keep covers and descriptions outside the books, in sidecar folders next to
-the `.inpx`. `inpx.sidecar.ts` resolves them at runtime, so no path is hardcoded:
+Flibusta/FLibrary mirrors keep covers, descriptions and author data outside the books, in sidecar
+folders next to the `.inpx`. `inpx.sidecar.ts` resolves them at runtime, so no path is hardcoded:
 
 - **Covers** live in a `covers/` archive named after the **book archive**, not a book-id range:
   `covers/f.fb2-009373-367300.zip|7z` for the book shard `f.fb2-009373-367300.7z`. The entry is the
@@ -96,12 +112,18 @@ the `.inpx`. `inpx.sidecar.ts` resolves them at runtime, so no path is hardcoded
 - **Annotations** live in a single `etc/annotations.7z`. Its internal entries are named after the book
   archive; each is an XML shard `<folder name="{bookArchive}"><file name="{fileBase}.fb2">text</file>`,
   read once per companion archive and converted to plain text.
+- **Author portraits and bios**: `etc/authors/pictures/*.zip|7z` holds portraits and
+  `etc/authors/*.zip|7z` holds bios, both keyed by MD5(author name). `buildIndex()` lists the shards
+  once and writes `inpx_author_sidecars`; `resolvePortrait` / `resolveBio` read a single entry on
+  demand. The key candidates cover the FLibrary exact form plus the lib.rus.ec comma and reversed-name
+  spellings. The bio fills an empty `authors.description` only; the portrait is saved through
+  `AuthorImageStorageService.saveFromBuffer`.
 - FLibrary EPUBs stored as 7z have no usable embedded metadata, so the sidecar cover is their only
   cover source. For FB2/EPUB the sidecar cover wins over the embedded one (it is the mirror's
   canonical art), and `MetadataService.extractAndSave` still supplies title/authors/series/ISBN.
 
-Author portraits/bios (`etc/authors/`, `etc/authors/pictures/`) and reviews (`etc/reviews/`) use the
-same sidecar idea but need an MD5-keyed index built over many shards; see follow-ups.
+Reviews (`etc/reviews/`) use the same idea but need a separate pointer index keyed by
+`archiveName#fileStem`; see follow-ups.
 
 ### API routes
 
@@ -116,6 +138,10 @@ same sidecar idea but need an MD5-keyed index built over many shards; see follow
 WS namespace `/inpx`: client emits `subscribe:library <libraryId>`; server sends
 `inpx:progress` (`{ archiveId, libraryId, phase: 'index'|'enrich', status, processed, total }`) and
 `inpx:completed` (`{ archiveId, libraryId, importedBooks, enrichedBooks }`).
+
+Author portraits/bios need no new route: they surface through the existing author endpoints
+(`GET /api/v1/authors/:id`, `.../image`, `.../thumbnail`), which lazily materialize and store the
+sidecar data on first access.
 
 ## Serving integration (archive-aware reads)
 
@@ -153,8 +179,9 @@ No changes were needed to the client reader: FB2 is already fetched whole throug
 
 - Server: `tsc --noEmit -p tsconfig.build.json` clean; `eslint` clean on all touched files.
 - Client: `vue-tsc --build` clean; `eslint` clean; `validate-locales.mjs` passes.
-- Tests: `inpx.parser.test.ts` (3) + `inpx.import.service.test.ts` (5) + `inpx.sidecar.test.ts` (8)
-  pass. Library delete fix covered by the updated `library.service.test.ts` remove test.
+- Tests: the INPX suite passes 23/23 (including 11 in `inpx.sidecar.test.ts`); the author suite
+  (`src/modules/authors`, 251 tests) passes. Library delete fix covered by the updated
+  `library.service.test.ts` remove test.
 - Pre-existing unrelated failures on Windows (present without these changes):
   - `book.service.test.ts` 4 tests (path separator `\tmp\...` vs `/tmp/...`).
   - `file-watcher.service.test.ts` 1 test (timing).
@@ -171,14 +198,18 @@ No changes were needed to the client reader: FB2 is already fetched whole throug
   (a follow-up should hide them for `storageKind === 'inpx'`).
 - Metadata write-back to files (`file-write`) is a no-op for archive files.
 - Sidecar covers in JPEG XL (`.jxl`) are not decoded yet: the thumbnail pipeline (`sharp`) cannot read
-  JXL, so `.jxl` entries are skipped. Everything else (`jpg`/`png`/`gif`/`webp`) works.
-- Author portraits/bios (`etc/authors/`, `etc/authors/pictures/`) and reviews (`etc/reviews/`) are not
-  imported yet; they need an MD5-keyed sidecar index across many shards.
+  JXL, so `.jxl` entries are skipped. Everything else (`jpg`/`png`/`gif`/`webp`) works. The same
+  applies to `.jxl` author portraits.
+- Book reviews (`etc/reviews/`) are not imported yet; they need a pointer index keyed by
+  `archiveName#fileStem`.
+- The author sidecar index is built once per library (first enrichment). If the mirror's `etc/authors`
+  folders change later, the index is not refreshed automatically yet.
 
 ## Deployment
 
-1. Migrations `0086_add-inpx.sql` and `0087_add-inpx-source-archive.sql` are applied automatically
-   when the server starts. To apply them manually: `cd server && pnpm db:migrate`.
+1. Migrations `0086_add-inpx.sql`, `0087_add-inpx-source-archive.sql`, and
+   `0088_add-inpx-author-sidecars.sql` are applied automatically when the server starts. To apply them
+   manually: `cd server && pnpm db:migrate`.
 2. Register an archive by absolute server path (e.g. `/books/flibusta.inpx`) in the library detail
    panel and start the import.
 
@@ -198,10 +229,8 @@ No changes were needed to the client reader: FB2 is already fetched whole throug
 - Re-import reconciliation: detect when the archive file on disk changes (`mtimeMs`) and offer a
   delta re-import.
 - Per-language `.inp` handling is already aggregated; consider surfacing language counts in the UI.
-- Author portraits/bios: add a sidecar index table (libraryId, MD5(author name), shard, entry) built
-  by listing `etc/authors/pictures/*.zip|7z` and `etc/authors/*.zip|7z`, then use
-  `AuthorImageStorageService.saveFromBuffer` to store portraits. Author name keys follow FLibrary:
-  lowercased, single-ASCII-space simplified, MD5 UTF-8 (plus the lib.rus.ec comma variants).
 - Reviews: build a `etc/reviews/*.zip|7z` pointer index keyed by `archiveName#fileStem`, mirroring the
   reference implementation.
-- Decode JPEG XL sidecar covers so `.jxl`-only mirrors get covers too.
+- Author sidecar index refresh: re-list `etc/authors` when the shard mtime changes, instead of building
+  only when the table is empty.
+- Decode JPEG XL sidecar covers and portraits so `.jxl`-only mirrors get images too.

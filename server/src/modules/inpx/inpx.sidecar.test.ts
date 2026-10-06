@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,7 +8,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   annotationFolderCandidates,
   annotationInternalCandidates,
+  authorEntryKeyFromPath,
   coverEntryCandidates,
+  md5AuthorKeyCandidates,
   parseAnnotationFromXml,
   resolveAnnotationsArchivePath,
   resolveCoverArchivePath,
@@ -77,5 +80,27 @@ describe('inpx sidecar helpers', () => {
     expect(parseAnnotationFromXml(xml, 'fb2-100000-200000.zip', '814211')).toBe('Hello');
     expect(parseAnnotationFromXml(xml, 'fb2-100000-200000.zip', '999')).toBeNull();
     expect(parseAnnotationFromXml(xml, 'missing.zip', '814211')).toBeNull();
+  });
+
+  it('keeps the exact normalized lower-case author key first', () => {
+    const candidates = md5AuthorKeyCandidates('Ivan Petrov');
+    expect(candidates[0]).toBe(createHash('md5').update('ivan petrov', 'utf8').digest('hex'));
+  });
+
+  it('adds comma and reversed-name variants for a comma author key', () => {
+    const candidates = md5AuthorKeyCandidates('Petrov, Ivan');
+    const md5 = (value: string) => createHash('md5').update(value, 'utf8').digest('hex');
+    expect(candidates).toContain(md5('petrov, ivan'));
+    expect(candidates).toContain(md5('Petrov Ivan'));
+    expect(candidates).toContain(md5('Ivan Petrov'));
+    expect(new Set(candidates).size).toBe(candidates.length);
+  });
+
+  it('reads the author key from an md5 directory or md5 file stem', () => {
+    const key = 'd41d8cd98f00b204e9800998ecf8427e';
+    expect(authorEntryKeyFromPath(`${key}/photo.jpg`)).toBe(key);
+    expect(authorEntryKeyFromPath(`${key}.html`)).toBe(key);
+    expect(authorEntryKeyFromPath('Author/photo.jpg')).toBeNull();
+    expect(authorEntryKeyFromPath('')).toBeNull();
   });
 });

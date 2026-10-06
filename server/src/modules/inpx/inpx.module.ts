@@ -6,6 +6,7 @@ import type { StringValue } from 'ms';
 import { AuthModule } from '../auth/auth.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataModule } from '../metadata/metadata.module';
+import { InpxAuthorSidecarService } from './inpx-author-sidecar.service';
 import { InpxController } from './inpx.controller';
 import { InpxGateway } from './inpx.gateway';
 import { InpxImportService } from './inpx.import.service';
@@ -28,7 +29,7 @@ import { InpxService } from './inpx.service';
     }),
   ],
   controllers: [InpxController],
-  providers: [InpxService, InpxImportService, InpxRepository, InpxParser, InpxGateway, InpxProgressStore],
-  exports: [InpxService],
+  providers: [InpxService, InpxImportService, InpxRepository, InpxParser, InpxGateway, InpxProgressStore, InpxAuthorSidecarService],
+  exports: [InpxService, InpxAuthorSidecarService],
 })
 export class InpxModule {}

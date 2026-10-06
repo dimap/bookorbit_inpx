@@ -51,6 +51,10 @@ Upstream BookOrbit's `main` does not contain them.
   INPX lib id / file name (`814211`, `814211.jpg`), resolved at runtime so any mirror layout works.
 - **Sidecar annotations**: book descriptions are read from `etc/annotations.7z`, keyed by the book
   archive name and file name, and stored as the book description.
+- **Author portraits and bios**: FLibrary keeps author photos in `etc/authors/pictures/*.zip|7z` and
+  bios in `etc/authors/*.zip|7z`, keyed by MD5(author name). The import lists these shards once and
+  indexes the keys; the portrait or bio is extracted the first time an author page is opened, so the
+  import stays fast for large libraries.
 - **Metadata enrichment**: FB2 (title, authors, series, ISBN, description, genres, cover) is extracted
   from the file; FLibrary 7z EPUBs get their cover and description from the sidecar archives.
   Enrichment is resumable, drains every book once, and reports live progress.
@@ -82,14 +86,13 @@ Done:
 - [x] Metadata enrichment for FB2 (title, authors, series, ISBN, description, genres)
 - [x] FLibrary sidecar covers resolved by book archive stem (`covers/{stem}.zip|7z`)
 - [x] FLibrary sidecar annotations (`etc/annotations.7z`) imported as book descriptions
+- [x] Author portraits and bios from `etc/authors/`, resolved lazily per author page
 - [x] Virtual `inpx://` folders so the scanner and file watcher skip archive books
 - [x] INPX panel and WebSocket progress in the UI
 - [x] `7zip` in the runtime image and Postgres `shm_size`
 
 Planned:
 
-- [ ] Author portraits and bios from `etc/authors/pictures/` and `etc/authors/` (needs an MD5 keyed
-      sidecar index, see [docs/INPX_SUPPORT.md](docs/INPX_SUPPORT.md))
 - [ ] Book reviews from `etc/reviews/`
 - [ ] Hide rename/move/export-only actions in the UI for archive-backed files
 - [ ] Re-import reconciliation when the archive file changes (`mtimeMs`)

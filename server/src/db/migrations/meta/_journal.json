@@ -617,6 +617,13 @@
       "when": 1788469511185,
       "tag": "0087_add-inpx-source-archive",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1791308996228,
+      "tag": "0088_add-inpx-author-sidecars",
+      "breakpoints": true
     }
   ]
 }

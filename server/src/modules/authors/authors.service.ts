@@ -33,6 +33,7 @@ import { LookupAuthorMetadataDto } from './dto/lookup-author-metadata.dto';
 import { MergeAuthorsDto } from './dto/merge-authors.dto';
 import { UpdateAuthorDto } from './dto/update-author.dto';
 import { AuthorMetadataFetchService } from './metadata/author-metadata-fetch.service';
+import { InpxAuthorSidecarService } from '../inpx/inpx-author-sidecar.service';
 
 @Injectable()
 export class AuthorsService {
@@ -51,6 +52,7 @@ export class AuthorsService {
     private readonly enrichmentExecutor: AuthorEnrichmentExecutorService,
     private readonly enrichmentOrchestrator: AuthorEnrichmentOrchestratorService,
     private readonly metadataScoreService: MetadataScoreService,
+    private readonly inpxAuthorSidecar: InpxAuthorSidecarService,
   ) {}
 
   private assertPaginationWindow(page: number, size: number): void {
@@ -131,7 +133,28 @@ export class AuthorsService {
     const libraryIds = await this.resolveLibraryIds(user);
     const row = await this.authorsRepo.findById(authorId, libraryIds, user.isSuperuser ? undefined : user.contentFilters);
     if (!row) throw new NotFoundException('Author not found');
+    await this.fillSidecarBio(authorId, row);
     return this.withAuthorImageUrl(this.mapAuthorDetail(row), 'full');
+  }
+
+  /**
+   * Lazily backfills an author bio from the Flibusta/FLibrary sidecars the first time the author page
+   * is opened. Only fills an empty description, so a user edit is never overwritten.
+   */
+  private async fillSidecarBio(authorId: number, row: AuthorDetailRow): Promise<void> {
+    if (row.description) return;
+    try {
+      const bio = await this.inpxAuthorSidecar.resolveBio(authorId, row.name);
+      if (!bio) return;
+      if (await this.authorsRepo.updateAuthorDescriptionIfEmpty(authorId, bio)) {
+        row.description = bio;
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[author.sidecar_bio] [fail] authorId=${authorId} errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - sidecar bio lookup failed`,
+      );
+    }
   }
 
   async findBooks(user: RequestUser, authorId: number, dto: ListAuthorBooksDto): Promise<BooksPage> {
@@ -394,12 +417,49 @@ export class AuthorsService {
 
   async getThumbnailPath(user: RequestUser, authorId: number): Promise<string | null> {
     await this.assertAuthorReadable(user, [authorId]);
-    return this.authorImageStorage.getThumbnailPath(authorId);
+    if (await this.authorImageStorage.getThumbnailPath(authorId)) {
+      return this.authorImageStorage.getThumbnailPath(authorId);
+    }
+    if (await this.ensureSidecarPortrait(authorId)) {
+      return this.authorImageStorage.getThumbnailPath(authorId);
+    }
+    return null;
   }
 
   async getImagePath(user: RequestUser, authorId: number): Promise<string | null> {
     await this.assertAuthorReadable(user, [authorId]);
-    return this.authorImageStorage.getImagePath(authorId);
+    if (await this.authorImageStorage.getImagePath(authorId)) {
+      return this.authorImageStorage.getImagePath(authorId);
+    }
+    if (await this.ensureSidecarPortrait(authorId)) {
+      return this.authorImageStorage.getImagePath(authorId);
+    }
+    return null;
+  }
+
+  /**
+   * Lazily materializes an author portrait from the Flibusta/FLibrary sidecars on first image request.
+   * The shared image storage then serves it like any uploaded photo.
+   */
+  private async ensureSidecarPortrait(authorId: number): Promise<boolean> {
+    try {
+      const row = await this.authorsRepo.findByIdForEnrichment(authorId);
+      if (!row?.name) return false;
+      const portrait = await this.inpxAuthorSidecar.resolvePortrait(authorId, row.name);
+      if (!portrait) return false;
+      await this.authorImageStorage.saveFromBuffer(authorId, portrait.data);
+      await this.authorsRepo.updateAuthorById(authorId, { hasPhoto: true });
+      this.logger.log(
+        `[author.sidecar_portrait] [end] authorId=${authorId} bytes=${portrait.data.length} contentType=${portrait.contentType} - author portrait resolved from sidecar`,
+      );
+      return true;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[author.sidecar_portrait] [fail] authorId=${authorId} errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - sidecar portrait lookup failed`,
+      );
+      return false;
+    }
   }
 
   async uploadImage(user: RequestUser, authorId: number, bytes: Buffer, mimeType: string): Promise<AuthorDetail> {

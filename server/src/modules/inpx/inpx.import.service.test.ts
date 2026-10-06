@@ -1,5 +1,6 @@
 import { InpxGateway } from './inpx.gateway';
 import { InpxImportService } from './inpx.import.service';
+import { InpxAuthorSidecarService } from './inpx-author-sidecar.service';
 import { InpxProgressStore } from './inpx-progress.store';
 import { InpxParser } from './inpx.parser';
 import { InpxRepository } from './inpx.repository';
@@ -37,6 +38,7 @@ describe('InpxImportService', () => {
   const parser = { parse: vi.fn() };
   const metadataService = { extractAndSave: vi.fn() };
   const gateway = { emitProgress: vi.fn(), emitCompleted: vi.fn() };
+  const authorSidecar = { buildIndex: vi.fn() };
 
   let service: InpxImportService;
 
@@ -49,6 +51,7 @@ describe('InpxImportService', () => {
       metadataService as unknown as MetadataService,
       gateway as unknown as InpxGateway,
       progressStore,
+      authorSidecar as unknown as InpxAuthorSidecarService,
     );
     repo.findArchiveById.mockResolvedValue({
       id: 11,

@@ -36,3 +36,36 @@ export const inpxArchives = pgTable(
 
 export type InpxArchive = typeof inpxArchives.$inferSelect;
 export type NewInpxArchive = typeof inpxArchives.$inferInsert;
+
+/**
+ * Index of the Flibusta/FLibrary author sidecars (`etc/authors/` bios and
+ * `etc/authors/pictures/` portraits). Entries inside those shards are keyed by MD5(author name), so
+ * one row maps a library + author key to the shard and entry that hold the bio and/or portrait.
+ */
+export const inpxAuthorSidecars = pgTable(
+  'inpx_author_sidecars',
+  {
+    id: serial('id').primaryKey(),
+    libraryId: integer('library_id')
+      .notNull()
+      .references(() => libraries.id, { onDelete: 'cascade' }),
+    authorKey: varchar('author_key', { length: 64 }).notNull(),
+    libraryRoot: varchar('library_root', { length: 4096 }).notNull(),
+    bioShardName: varchar('bio_shard_name', { length: 512 }),
+    bioEntryPath: varchar('bio_entry_path', { length: 4096 }),
+    portraitShardName: varchar('portrait_shard_name', { length: 512 }),
+    portraitEntryPath: varchar('portrait_entry_path', { length: 4096 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .defaultNow()
+      .notNull()
+      .$onUpdateFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex('inpx_author_sidecars_library_key_uidx').on(t.libraryId, t.authorKey),
+    index('inpx_author_sidecars_library_id_idx').on(t.libraryId),
+  ],
+);
+
+export type InpxAuthorSidecar = typeof inpxAuthorSidecars.$inferSelect;
+export type NewInpxAuthorSidecar = typeof inpxAuthorSidecars.$inferInsert;

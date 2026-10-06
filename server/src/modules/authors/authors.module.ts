@@ -30,6 +30,7 @@ import { AuthorsService } from './authors.service';
 import { AuthorMetadataPreferencesService } from './author-metadata-preferences.service';
 import { AuthorMetadataPreferenceResolver } from './metadata/author-metadata-preference-resolver';
 import { MetadataPreferencesModule } from '../metadata-preferences/metadata-preferences.module';
+import { InpxModule } from '../inpx/inpx.module';
 
 const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthorMetadataProvider];
 
@@ -41,6 +42,7 @@ const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthor
     MetadataModule,
     MetadataPreferencesModule,
     MetadataScoreModule,
+    InpxModule,
     forwardRef(() => NotificationModule),
     AuthModule,
     JwtModule.registerAsync({

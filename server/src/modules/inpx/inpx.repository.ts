@@ -14,6 +14,7 @@ import {
   books,
   genres,
   inpxArchives,
+  inpxAuthorSidecars,
   libraryFolders,
 } from '../../db/schema';
 import { SeriesIdentityService } from '../../common/services/series-identity.service';
@@ -29,6 +30,14 @@ export interface InpxImportChunkResult {
   skipped: number;
   createdBookIds: number[];
   bookEntries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[];
+}
+
+export interface InpxAuthorSidecarInput {
+  authorKey: string;
+  bioShardName: string | null;
+  bioEntryPath: string | null;
+  portraitShardName: string | null;
+  portraitEntryPath: string | null;
 }
 
 /**
@@ -154,6 +163,40 @@ export class InpxRepository {
       .innerJoin(bookMetadata, eq(bookMetadata.bookId, bookFiles.bookId))
       .where(and(eq(bookFiles.inpxArchiveId, archiveId), isNotNull(bookMetadata.coverSource)));
     return row?.count ?? 0;
+  }
+
+  async countAuthorSidecars(libraryId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(inpxAuthorSidecars)
+      .where(eq(inpxAuthorSidecars.libraryId, libraryId));
+    return row?.count ?? 0;
+  }
+
+  async replaceAuthorSidecars(libraryId: number, libraryRoot: string, rows: InpxAuthorSidecarInput[]): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.delete(inpxAuthorSidecars).where(eq(inpxAuthorSidecars.libraryId, libraryId));
+      for (let i = 0; i < rows.length; i += 500) {
+        const chunk = rows.slice(i, i + 500).map((row) => ({ ...row, libraryId, libraryRoot }));
+        await tx.insert(inpxAuthorSidecars).values(chunk).onConflictDoNothing();
+      }
+    });
+  }
+
+  /** Author sidecar rows for the given author, restricted to libraries that author actually appears in. */
+  async findAuthorSidecarRows(authorId: number, authorKeys: string[]): Promise<(typeof inpxAuthorSidecars.$inferSelect)[]> {
+    if (authorKeys.length === 0) return [];
+    const libraryRows = await this.db
+      .selectDistinct({ libraryId: books.libraryId })
+      .from(bookAuthors)
+      .innerJoin(books, eq(books.id, bookAuthors.bookId))
+      .where(eq(bookAuthors.authorId, authorId));
+    const libraryIds = libraryRows.map((row) => row.libraryId);
+    if (libraryIds.length === 0) return [];
+    return this.db
+      .select()
+      .from(inpxAuthorSidecars)
+      .where(and(inArray(inpxAuthorSidecars.libraryId, libraryIds), inArray(inpxAuthorSidecars.authorKey, authorKeys)));
   }
 
   /**

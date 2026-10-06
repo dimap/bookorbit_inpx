@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import iconv from 'iconv-lite';
 
 /**
  * Flibusta/FLibrary lays covers, annotations, author bios/portraits and reviews out in "sidecar"
@@ -129,4 +131,95 @@ export function parseAnnotationFromXml(xml: string, folderName: string, fileBase
     new RegExp(`<file\\s+[^>]*name\\s*=\\s*["']${escapeRegExp(fileBase)}\\.fb2["'][^>]*>([\\s\\S]*?)</file>`, 'i'),
   );
   return fileMatch ? fileMatch[1].trim() : null;
+}
+
+// ── Author sidecar keys ───────────────────────────────────────────────────────
+
+export function md5Hex(value: string): string {
+  return createHash('md5').update(value, 'utf8').digest('hex');
+}
+
+export function isMd5Key32(value: string): boolean {
+  return /^[a-f0-9]{32}$/i.test(String(value || '').trim());
+}
+
+/**
+ * MD5 key spellings used by Flibusta/FLibrary mirrors for an author name. The leading candidate is
+ * the exact match used by FLibrary (`AuthorAnnotationController::Find`: split on ASCII spaces,
+ * collapse, lowercase, MD5 UTF-8); the rest cover older lib.rus.ec spellings (comma forms, reversed
+ * name order, windows-1251). The index build and the lookup must agree, so both use this list.
+ */
+export function md5AuthorKeyCandidates(authorName: string): string[] {
+  const raw = String(authorName || '').trim();
+  if (!raw) return [];
+  const out: string[] = [];
+  const push = (hash: string): void => {
+    if (hash && !out.includes(hash)) out.push(hash);
+  };
+
+  const exact = raw
+    .split(' ')
+    .filter((part) => part.length > 0)
+    .join(' ')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  push(md5Hex(exact));
+
+  const collapsedLower = raw.split(/\s+/).filter(Boolean).join(' ').toLowerCase().replace(/\s+/g, ' ').trim();
+  push(md5Hex(collapsedLower));
+
+  const commaParts = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (commaParts.length) {
+    const commaSpaced = commaParts.join(' ');
+    push(md5Hex(commaSpaced));
+    push(md5Hex(commaSpaced.toLowerCase()));
+    if (commaParts.length >= 2) {
+      const reversed = [...commaParts.slice(1), commaParts[0]].join(' ');
+      push(md5Hex(reversed));
+      push(md5Hex(reversed.toLowerCase()));
+    }
+    try {
+      push(createHash('md5').update(iconv.encode(commaSpaced, 'windows-1251')).digest('hex'));
+    } catch {
+      // iconv cannot encode the name; skip this variant.
+    }
+  }
+
+  push(md5Hex(raw));
+  push(md5Hex(raw.toLowerCase()));
+  const collapsed = raw.replace(/\s+/g, ' ');
+  if (collapsed !== raw) push(md5Hex(collapsed));
+  const words = raw.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) push(md5Hex([...words].reverse().join(' ')));
+  try {
+    push(createHash('md5').update(iconv.encode(raw, 'windows-1251')).digest('hex'));
+  } catch {
+    // iconv cannot encode the name; skip this variant.
+  }
+
+  return out;
+}
+
+/**
+ * Author key carried by a sidecar entry path: the leading directory when it is an MD5 (portraits and
+ * bios are often stored as `<md5>/...`), otherwise the file stem when that is an MD5.
+ */
+export function authorEntryKeyFromPath(entryPath: string): string | null {
+  const normalized = String(entryPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '');
+  if (!normalized) return null;
+  const slash = normalized.indexOf('/');
+  if (slash >= 0) {
+    const segment = normalized.slice(0, slash).toLowerCase();
+    return isMd5Key32(segment) ? segment : null;
+  }
+  const stem = basename(normalized)
+    .replace(/\.[^/.]+$/, '')
+    .toLowerCase();
+  return isMd5Key32(stem) ? stem : null;
 }
