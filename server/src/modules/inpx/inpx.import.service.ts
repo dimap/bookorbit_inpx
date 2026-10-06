@@ -3,11 +3,19 @@ import { readdirSync } from 'node:fs';
 import { rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { XMLParser } from 'fast-xml-parser';
 import type { InpxImportProgressEvent } from '@bookorbit/types';
-import { getCachedInpxContainer, openInpxContainer, type InpxContainer } from '../../common/inpx-container';
+import { openInpxContainer, type InpxContainer } from '../../common/inpx-container';
+import { htmlToPlainText } from '../../common/utils/html-to-text.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { MetadataService } from '../metadata/metadata.service';
+import {
+  annotationFolderCandidates,
+  annotationInternalCandidates,
+  coverEntryCandidates,
+  parseAnnotationFromXml,
+  resolveAnnotationsArchivePath,
+  resolveCoverArchivePath,
+} from './inpx.sidecar';
 import { InpxGateway } from './inpx.gateway';
 import { InpxProgressStore } from './inpx-progress.store';
 import type { InpxBookRecord } from './inpx.parser';
@@ -19,14 +27,6 @@ const PROGRESS_EMIT_EVERY = 10;
 
 /** Companion archives whose entry layout has already been logged this process run. */
 const inspectedArchives = new Set<number>();
-
-interface SidecarArchive {
-  start: number;
-  end: number;
-  path: string;
-}
-
-const sidecarArchiveCache = new Map<string, SidecarArchive[]>();
 
 @Injectable()
 export class InpxImportService {
@@ -99,25 +99,31 @@ export class InpxImportService {
         this.logger.log(`[${event}] [end] archiveId=${archiveId} fixedAuthorNames=${fixedAuthors} - legacy colon author names normalized`);
       }
 
-      // Covers and descriptions live inside the books (their image references point at the separate
-      // image archives), so each book is read one at a time - never a whole shard - to keep disk
-      // use to a single file.
+      // `findUnenrichedBookFiles` selects on `coverSource is null`, so a book that genuinely has no
+      // cover would otherwise be handed back on every pass and the loop would never drain. Track
+      // every attempted book so the pass terminates on its own.
+      const libraryRoot = dirname(archive.absolutePath);
+      const processedBookIds = new Set<number>();
       const failedBookIds = new Set<number>();
       let enriched = 0;
       for (;;) {
         const files = await this.repo.findUnenrichedBookFiles(archiveId, 500);
-        const pending = files.filter((file) => !failedBookIds.has(file.bookId));
+        const pending = files.filter((file) => !processedBookIds.has(file.bookId) && !failedBookIds.has(file.bookId));
         if (pending.length === 0) break;
 
         progress.total += pending.length;
         this.progressStore.set(progress);
-        const result = await this.enrichEntries(archive.absolutePath, pending, (count) => {
+        const result = await this.enrichEntries(libraryRoot, archive.absolutePath, pending, (count) => {
           progress.processed = count;
           this.progressStore.set(progress);
           if (count % PROGRESS_EMIT_EVERY === 0 || count >= progress.total) this.gateway.emitProgress({ ...progress });
         });
         enriched += result.enriched;
-        for (const bookId of result.failedBookIds) failedBookIds.add(bookId);
+        for (const file of pending) processedBookIds.add(file.bookId);
+        for (const bookId of result.failedBookIds) {
+          failedBookIds.add(bookId);
+          processedBookIds.add(bookId);
+        }
       }
 
       const [totalBooks, enrichedCount] = await Promise.all([
@@ -307,11 +313,14 @@ export class InpxImportService {
   }
 
   /**
-   * Reads each book's file one at a time (never a whole shard, so disk stays at a single file) and
-   * lets the standard metadata pipeline extract cover, description and other fields. The index `EXT`
-   * does not always match the real file, so the format is sniffed from the content.
+   * Reads each book's file one at a time (never a whole shard, so disk stays at a single file). Cover
+   * images and annotations are pulled from the Flibusta/FLibrary sidecar archives next to the INPX
+   * when present, otherwise the standard metadata pipeline extracts cover, description and other
+   * fields from the book itself. The index `EXT` does not always match the real file, so the format
+   * is sniffed from the content.
    */
   private async enrichEntries(
+    libraryRoot: string,
     inpxPath: string,
     entries: { bookId: number; entryPath: string; sourceArchivePath: string | null }[],
     onProgress: (processed: number) => void,
@@ -331,7 +340,7 @@ export class InpxImportService {
     const failedBookIds = new Set<number>();
     let runningTotal = 0;
     for (const [archivePath, groupEntries] of groups) {
-      const result = await this.enrichFromContainer(archivePath, groupEntries, (localProcessed) => {
+      const result = await this.enrichFromContainer(libraryRoot, archivePath, groupEntries, (localProcessed) => {
         onProgress(runningTotal + localProcessed);
       });
       enriched += result.enriched;
@@ -342,14 +351,36 @@ export class InpxImportService {
   }
 
   private async enrichFromContainer(
+    libraryRoot: string,
     archivePath: string,
     entries: { bookId: number; entryPath: string }[],
     onProgress: (processed: number) => void,
   ): Promise<{ enriched: number; failedBookIds: number[] }> {
     const container = await openInpxContainer(archivePath);
+    const coverArchivePath = resolveCoverArchivePath(libraryRoot, archivePath);
+    const coverContainer = coverArchivePath ? await openInpxContainer(coverArchivePath) : null;
+    const annotationXml = await this.readAnnotationShard(libraryRoot, archivePath);
+    const annotationFolders = annotationXml ? annotationFolderCandidates(archivePath) : [];
     let nextIndex = 0;
     let enriched = 0;
+    let annotationsSaved = 0;
     const failedBookIds = new Set<number>();
+
+    const applyAnnotation = async (bookId: number, entryPath: string): Promise<void> => {
+      if (!annotationXml) return;
+      const fileBase = basename(entryPath).replace(/\.[^.]+$/, '');
+      if (!fileBase) return;
+      for (const folderName of annotationFolders) {
+        const raw = parseAnnotationFromXml(annotationXml, folderName, fileBase);
+        if (!raw) continue;
+        const description = htmlToPlainText(raw);
+        if (description) {
+          await this.metadataService.saveExtractedDescription(bookId, description);
+          annotationsSaved += 1;
+        }
+        return;
+      }
+    };
 
     const worker = async (): Promise<void> => {
       while (nextIndex < entries.length) {
@@ -362,16 +393,28 @@ export class InpxImportService {
           if (!buffer || buffer.length === 0) continue;
           const format = detectBookFormat(buffer);
           if (!format) continue;
+
+          const fileId = basename(entry.entryPath).replace(/\.[^.]+$/, '');
+          const sidecarCover = coverContainer ? await readCoverEntry(coverContainer, coverEntryCandidates(fileId, entry.entryPath)) : null;
+
           if (format === '7z') {
-            // FLibrary variant: the "epub" is a 7z whose cover image lives in a sidecar archive.
-            const fileId = basename(entry.entryPath).replace(/\.[^.]+$/, '');
-            const saved = await this.extractFlibraryCover(entry.bookId, fileId, buffer, dirname(archivePath), archivePath);
-            if (saved) enriched += 1;
+            // FLibrary EPUB: a 7z wrapper with no embedded metadata of its own, so the sidecar cover
+            // is the only cover source.
+            if (sidecarCover) {
+              await this.metadataService.saveExtractedCoverBytes(entry.bookId, sidecarCover);
+              enriched += 1;
+            }
+            await applyAnnotation(entry.bookId, entry.entryPath);
             continue;
           }
+
           tempPath = join(tmpdir(), `inpx-book-${entry.bookId}.${format}`);
           await writeFile(tempPath, buffer);
           await this.metadataService.extractAndSave(entry.bookId, tempPath, format);
+          // The Flibusta sidecar cover is the mirror's canonical cover, so it wins over whatever the
+          // file embedded when both exist.
+          if (sidecarCover) await this.metadataService.saveExtractedCoverBytes(entry.bookId, sidecarCover);
+          await applyAnnotation(entry.bookId, entry.entryPath);
           enriched += 1;
         } catch (err) {
           failedBookIds.add(entry.bookId);
@@ -382,17 +425,27 @@ export class InpxImportService {
           );
         } finally {
           if (tempPath) await rm(tempPath, { force: true }).catch(() => undefined);
+          onProgress(Math.min(nextIndex, entries.length));
         }
-        onProgress(Math.min(nextIndex, entries.length));
       }
     };
 
     try {
       await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
     } finally {
+      await coverContainer?.close();
       await container.close();
     }
 
+    if (coverArchivePath) {
+      this.logger.log(
+        `[inpx.sidecar] [end] archive="${sanitizeLogValue(archivePath)}" coverArchive="${sanitizeLogValue(coverArchivePath)}" enriched=${enriched} annotations=${annotationsSaved} - sidecar enrichment completed`,
+      );
+    } else if (annotationsSaved > 0) {
+      this.logger.log(
+        `[inpx.sidecar] [end] archive="${sanitizeLogValue(archivePath)}" coverArchive=none annotations=${annotationsSaved} - annotation-only enrichment completed`,
+      );
+    }
     if (failedBookIds.size > 0) {
       this.logger.warn(
         `[inpx.enrich] [end] archive="${sanitizeLogValue(archivePath)}" enriched=${enriched} failed=${failedBookIds.size} - enrichment completed with failures`,
@@ -402,112 +455,30 @@ export class InpxImportService {
   }
 
   /**
-   * FLibrary books are 7z archives whose cover image lives in a sidecar archive (`covers/` or
-   * `images/` next to the book archives). The cover path is read from the EPUB's OPF inside the 7z.
+   * Loads the `etc/annotations.7z` XML shard that holds this book archive's records. The shard maps
+   * book archive names to per-file annotations; loading it once per companion archive keeps a single
+   * 7z extraction instead of one per book.
    */
-  private async extractFlibraryCover(bookId: number, fileId: string, bookBuffer: Buffer, baseDir: string, bookArchivePath: string): Promise<boolean> {
-    const tempPath = join(tmpdir(), `inpx-epub-${bookId}.7z`);
-    await writeFile(tempPath, bookBuffer);
+  private async readAnnotationShard(libraryRoot: string, bookArchivePath: string): Promise<string> {
+    const annotationsPath = resolveAnnotationsArchivePath(libraryRoot);
+    if (!annotationsPath) return '';
+    let container: InpxContainer | null = null;
     try {
-      const container = await openInpxContainer(tempPath);
-      try {
-        const opfEntry = container.entries.find((entry) => /content\.opf$/i.test(entry.name));
-        if (!opfEntry) {
-          this.logger.debug(`[inpx.enrich] [skip] bookId=${bookId} reason="no content.opf in epub"`);
-          return false;
-        }
-        const opfXml = (await container.readEntry(opfEntry.name))?.toString('utf8');
-        const coverHref = opfXml ? findOpfCoverPath(opfXml) : null;
-        if (!coverHref) {
-          this.logger.debug(`[inpx.enrich] [skip] bookId=${bookId} reason="no cover meta in opf"`);
-          return false;
-        }
-        const coverBytes = await this.readCoverFromSidecar(baseDir, fileId, basename(coverHref), bookArchivePath);
-        if (!coverBytes) {
-          this.logger.debug(
-            `[inpx.enrich] [skip] bookId=${bookId} fileId=${fileId} cover="${sanitizeLogValue(basename(coverHref))}" - cover not found in sidecar`,
-          );
-          return false;
-        }
-        await this.metadataService.saveExtractedCoverBytes(bookId, coverBytes);
-        return true;
-      } finally {
-        await container.close();
+      container = await openInpxContainer(annotationsPath);
+      for (const internal of annotationInternalCandidates(bookArchivePath)) {
+        const buffer = await container.readEntry(internal);
+        if (buffer && buffer.length > 0) return buffer.toString('utf8');
       }
+      return '';
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[inpx.sidecar] [fail] action=annotations archive="${sanitizeLogValue(annotationsPath)}" errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - annotation shard could not be read`,
+      );
+      return '';
     } finally {
-      await rm(tempPath, { force: true }).catch(() => undefined);
+      if (container) await container.close();
     }
-  }
-
-  private async readCoverFromSidecar(baseDir: string, fileId: string, coverName: string, bookArchivePath: string): Promise<Buffer | null> {
-    const archive = this.findSidecarArchive(baseDir, fileId);
-    const candidates = [
-      coverName,
-      `${fileId}.jpg`,
-      `${fileId}.jpeg`,
-      `${fileId}.png`,
-      `${fileId}.webp`,
-      `${fileId}.gif`,
-      `${fileId}.jxl`,
-      `fb2-${fileId}.jpg`,
-      `fb2-${fileId}.jpeg`,
-      `fb2-${fileId}.png`,
-      `fb2-${fileId}.jxl`,
-    ];
-    if (archive) {
-      const container = await getCachedInpxContainer(archive.path);
-      const bytes = await readCandidateCover(container, candidates, coverName);
-      if (bytes) return bytes;
-    }
-    // Fallback: the images may live in the book archive itself rather than a sidecar folder.
-    if (bookArchivePath !== baseDir) {
-      const container = await getCachedInpxContainer(bookArchivePath);
-      const bytes = await readCandidateCover(container, candidates, coverName);
-      if (bytes) return bytes;
-    }
-    return null;
-  }
-
-  private findSidecarArchive(baseDir: string, fileId: string): SidecarArchive | null {
-    const archives = sidecarArchiveCache.get(baseDir) ?? this.discoverSidecarArchives(baseDir);
-    const id = Number.parseInt(fileId, 10);
-    if (!Number.isFinite(id)) return null;
-    for (const archive of archives) {
-      if (id >= archive.start && id <= archive.end) return archive;
-    }
-    return null;
-  }
-
-  private discoverSidecarArchives(baseDir: string): SidecarArchive[] {
-    const archives: SidecarArchive[] = [];
-    const scanDir = (dir: string): void => {
-      let names: string[];
-      try {
-        names = readdirSync(dir);
-      } catch {
-        return;
-      }
-      for (const name of names) {
-        const match = /(?:[a-z]\.)?fb2-(\d+)-(\d+)\.(?:zip|7z)$/i.exec(name);
-        if (!match) continue;
-        archives.push({ start: Number(match[1]), end: Number(match[2]), path: join(dir, name) });
-      }
-    };
-    scanDir(baseDir);
-    scanDir(join(baseDir, 'covers'));
-    scanDir(join(baseDir, 'images'));
-    scanDir(join(baseDir, 'cover'));
-    scanDir(join(baseDir, 'img'));
-    archives.sort((a, b) => a.start - b.start);
-    sidecarArchiveCache.set(baseDir, archives);
-    const sample = archives
-      .slice(0, 5)
-      .map((archive) => archive.path)
-      .join(', ');
-    this.logger.log(
-      `[inpx.sidecar] [end] base="${sanitizeLogValue(baseDir)}" archives=${archives.length} sample="${sanitizeLogValue(sample)}" - sidecar cover/image archives discovered`,
-    );
-    return archives;
   }
 }
 
@@ -538,50 +509,10 @@ function detectBookFormat(buffer: Buffer): 'fb2' | 'epub' | '7z' | null {
   return null;
 }
 
-async function readCandidateCover(container: InpxContainer, candidates: string[], coverName: string): Promise<Buffer | null> {
+async function readCoverEntry(container: InpxContainer, candidates: string[]): Promise<Buffer | null> {
   for (const candidate of candidates) {
-    if (!container.entries.some((entry) => entry.name === candidate)) continue;
     const bytes = await container.readEntry(candidate);
     if (bytes && bytes.length > 0) return bytes;
-  }
-  for (const entry of container.entries) {
-    if (basename(entry.name) === coverName) {
-      const bytes = await container.readEntry(entry.name);
-      if (bytes && bytes.length > 0) return bytes;
-    }
-  }
-  return null;
-}
-
-/** Reads the cover file href from an EPUB2 OPF (`<meta name="cover" content="id"/>` + manifest item). */
-function findOpfCoverPath(opfXml: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = new XMLParser({ ignoreAttributes: false }).parse(opfXml);
-  } catch {
-    return null;
-  }
-  const pkg = (parsed as { package?: Record<string, unknown> })?.package;
-  if (!pkg) return null;
-  const metadata = pkg.metadata as { meta?: unknown } | undefined;
-  let coverId: string | null = null;
-  if (metadata?.meta) {
-    const metas = Array.isArray(metadata.meta) ? metadata.meta : [metadata.meta];
-    for (const meta of metas) {
-      const m = meta as { '@_name'?: string; '@_content'?: string };
-      if (m['@_name'] === 'cover') {
-        coverId = m['@_content'] ?? null;
-        break;
-      }
-    }
-  }
-  if (!coverId) return null;
-  const manifest = pkg.manifest as { item?: unknown } | undefined;
-  if (!manifest?.item) return null;
-  const items = Array.isArray(manifest.item) ? manifest.item : [manifest.item];
-  for (const item of items) {
-    const it = item as { '@_id'?: string; '@_href'?: string };
-    if (it['@_id'] === coverId) return it['@_href'] ?? null;
   }
   return null;
 }

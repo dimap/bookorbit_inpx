@@ -219,6 +219,24 @@ export class MetadataService {
     await this.scoreService.calculateAndSave(bookId);
   }
 
+  /**
+   * Persists a description extracted from an external source (e.g. a Flibusta sidecar annotation).
+   * Runs through the field-lock filter so a user edit or a richer provider wins, then re-embeds the
+   * book so search reflects the new text.
+   */
+  async saveExtractedDescription(bookId: number, description: string): Promise<void> {
+    const normalized = normalizeMetadataText(description);
+    if (!normalized) return;
+    const { dto } = await this.bookMetadataLockService.filterAutomatedBookUpdate(bookId, { description: normalized });
+    if (dto.description === undefined) return;
+    await this.db.update(bookMetadata).set({ description: dto.description, updatedAt: new Date() }).where(eq(bookMetadata.bookId, bookId));
+    this.embedder?.embedBook(bookId).catch((error: Error) => {
+      this.logger.warn(
+        `[metadata.embedding] [fail] bookId=${bookId} errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - book embedding failed`,
+      );
+    });
+  }
+
   async refreshCoverForBook(bookId: number, absolutePath: string, format: string): Promise<boolean> {
     const event = 'metadata.cover_refresh';
     const startedAt = Date.now();
