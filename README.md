@@ -46,10 +46,14 @@ Upstream BookOrbit's `main` does not contain them.
   or FB2), not from the index extension. FLibrary EPUBs stored as 7z archives are handled too.
 - **Native 7z reader**: reads 7z archives (including solid archives) through the system `7z` binary,
   with a byte-offset ZIP reader for ordinary EPUBs.
-- **Cover extraction**: for FLibrary EPUBs whose images are not inside the book, the cover is
-  resolved from the EPUB's OPF and fetched from the sidecar `covers/` / `images/` archives.
-- **Metadata enrichment**: FB2 (title, authors, series, ISBN, description, genres, cover) and FLibrary
-  EPUB covers are extracted during import. Enrichment is resumable and reports live progress.
+- **Sidecar covers**: FLibrary keeps covers outside the books, in a `covers/` archive named after the
+  book archive itself (`covers/f.fb2-009373-367300.zip`, not a book-id range). The cover entry is the
+  INPX lib id / file name (`814211`, `814211.jpg`), resolved at runtime so any mirror layout works.
+- **Sidecar annotations**: book descriptions are read from `etc/annotations.7z`, keyed by the book
+  archive name and file name, and stored as the book description.
+- **Metadata enrichment**: FB2 (title, authors, series, ISBN, description, genres, cover) is extracted
+  from the file; FLibrary 7z EPUBs get their cover and description from the sidecar archives.
+  Enrichment is resumable, drains every book once, and reports live progress.
 - **Virtual folders**: each archive gets a virtual `inpx://<archiveId>` library folder. The scanner
   and file watcher skip it, so INPX books are never flagged missing. Rename and move are rejected for
   archive-backed files.
@@ -61,6 +65,8 @@ Upstream BookOrbit's `main` does not contain them.
 - The runtime Docker image now installs the native `7zip` package required by the archive reader.
 - Postgres gets `shm_size: '1gb'` so heavy catalog queries (series pages, counts) do not abort on
   Docker's default 64 MB `/dev/shm`.
+- Deleting a large library drains its books in bounded batches (1000 at a time, with the per-statement
+  timeout lifted inside each batch) instead of one giant cascade that hit the 30s statement timeout.
 
 See [docs/INPX_SUPPORT.md](docs/INPX_SUPPORT.md) for the full data model, API routes, and module map.
 
@@ -74,13 +80,17 @@ Done:
 - [x] Content-based format detection (ZIP EPUB, 7z, FB2)
 - [x] Native 7z reader for solid archives
 - [x] Metadata enrichment for FB2 (title, authors, series, ISBN, description, genres)
-- [x] Cover extraction, including FLibrary covers from sidecar image archives
+- [x] FLibrary sidecar covers resolved by book archive stem (`covers/{stem}.zip|7z`)
+- [x] FLibrary sidecar annotations (`etc/annotations.7z`) imported as book descriptions
 - [x] Virtual `inpx://` folders so the scanner and file watcher skip archive books
 - [x] INPX panel and WebSocket progress in the UI
 - [x] `7zip` in the runtime image and Postgres `shm_size`
 
 Planned:
 
+- [ ] Author portraits and bios from `etc/authors/pictures/` and `etc/authors/` (needs an MD5 keyed
+      sidecar index, see [docs/INPX_SUPPORT.md](docs/INPX_SUPPORT.md))
+- [ ] Book reviews from `etc/reviews/`
 - [ ] Hide rename/move/export-only actions in the UI for archive-backed files
 - [ ] Re-import reconciliation when the archive file changes (`mtimeMs`)
 - [ ] Surface per-language counts in the UI
