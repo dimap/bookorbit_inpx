@@ -15,8 +15,8 @@ a multi-hundred-GB Flibusta library on disk exactly once.
 
 ## Current status
 
-- The feature is implemented end to end (backend + client) and committed on branch
-  `feat/inpx-support`, pushed to the fork `dimap/bookorbit_inpx` (remote `fork`).
+- The feature is implemented end to end (backend + client) and merged into `main` in the fork
+  `dimap/bookorbit_inpx` (remote `fork`). Development continues on `feat/inpx-support`.
 - DB migrations `0086_add-inpx.sql` and `0087_add-inpx-source-archive.sql` were generated with
   Drizzle Kit. The server applies them automatically on container start.
 - Tests, typecheck, lint all pass; the only failures seen are pre-existing Windows issues in
@@ -156,12 +156,13 @@ No changes were needed to the client reader: FB2 is already fetched whole throug
 
 ## Branch state
 
-- Work lives on `feat/inpx-support` in the fork `dimap/bookorbit_inpx`
+- The work is merged into `main` in the fork `dimap/bookorbit_inpx`
   (`https://github.com/dimap/bookorbit_inpx.git`, remote `fork`), based on upstream `main`.
+  New development continues on `feat/inpx-support`.
 - Commits are pushed with `--no-verify` because the git hooks cannot run on the Windows dev machine
   (`pnpm` is not on PATH, and `pre-push` runs `verify:fast`).
 - The fork is deployed by building the image from source:
-  `docker build -t bookorbit-inpx:latest . && docker compose up -d`.
+  `docker compose -f docker-compose.build.yml up -d --build`.
 
 ## Suggested follow-ups
 

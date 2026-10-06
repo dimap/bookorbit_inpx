@@ -5,6 +5,8 @@
 A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and comics, with added
 support for **INPX archive catalogs** (Flibusta / FLibrary / FlibRusEc).
 
+**English** | [Русский](README.ru.md)
+
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square&color=B461B3)](LICENSE)
 [![Fork](https://img.shields.io/badge/fork-dimap%2Fbookorbit__inpx-2ea44f?style=flat-square&logo=github)](https://github.com/dimap/bookorbit_inpx)
 [![Upstream](https://img.shields.io/badge/upstream-bookorbit%2Fbookorbit-blue?style=flat-square&logo=github)](https://github.com/bookorbit/bookorbit)
@@ -27,7 +29,8 @@ archives they reference. This fork reads books straight out of those archives at
 time, so a large Flibusta-style library (hundreds of GB) stays on disk exactly once and nothing is
 copied or unpacked.
 
-The fork's changes live on the **`feat/inpx-support`** branch. Upstream `main` does not contain them.
+The fork's changes are on the **`main`** branch (development happens on `feat/inpx-support`).
+Upstream BookOrbit's `main` does not contain them.
 
 ## What's different from upstream BookOrbit
 
@@ -61,13 +64,38 @@ The fork's changes live on the **`feat/inpx-support`** branch. Upstream `main` d
 
 See [docs/INPX_SUPPORT.md](docs/INPX_SUPPORT.md) for the full data model, API routes, and module map.
 
+## Roadmap / TODO
+
+Done:
+
+- [x] Register and import `.inpx` catalogs (index phase)
+- [x] Read and download books straight from the archive
+- [x] Companion `.7z` shards (FlibRusEc / FLibrary layout)
+- [x] Content-based format detection (ZIP EPUB, 7z, FB2)
+- [x] Native 7z reader for solid archives
+- [x] Metadata enrichment for FB2 (title, authors, series, ISBN, description, genres)
+- [x] Cover extraction, including FLibrary covers from sidecar image archives
+- [x] Virtual `inpx://` folders so the scanner and file watcher skip archive books
+- [x] INPX panel and WebSocket progress in the UI
+- [x] `7zip` in the runtime image and Postgres `shm_size`
+
+Planned:
+
+- [ ] Hide rename/move/export-only actions in the UI for archive-backed files
+- [ ] Re-import reconciliation when the archive file changes (`mtimeMs`)
+- [ ] Surface per-language counts in the UI
+- [ ] Byte-range requests for archive-backed files
+- [ ] Metadata write-back to archive files
+
 ## Installation (Docker, built from source)
 
-This fork is not published to GHCR, so you build the image from the `feat/inpx-support` branch. The
-runtime image bundles the native `7z` binary the archive reader needs.
+This fork is not published to GHCR, so you build the image from this repository. The runtime image
+bundles the native `7z` binary the archive reader needs.
+
+Clone the repository and prepare the folders:
 
 ```bash
-git clone -b feat/inpx-support https://github.com/dimap/bookorbit_inpx.git bookorbit
+git clone https://github.com/dimap/bookorbit_inpx.git bookorbit
 cd bookorbit
 mkdir -p books data/app data/postgres
 cp .env.example .env
@@ -76,7 +104,6 @@ cp .env.example .env
 Edit `.env` and set these required values:
 
 ```dotenv
-APP_IMAGE=bookorbit-inpx:latest        # the image you build below, NOT ghcr.io/bookorbit/bookorbit
 APP_URL=http://your-server-ip:3000     # the URL you'll open in your browser
 BOOKS_HOST_PATH=./books                # folder on your server where your book files live
 
@@ -85,7 +112,24 @@ JWT_SECRET=                # signs login tokens          - openssl rand -hex 32
 SETUP_BOOTSTRAP_TOKEN=     # one-time setup wizard token - openssl rand -hex 16
 ```
 
-Build the image and start the stack:
+Then pick one of the two ways to start.
+
+### Option A: ready-made compose (builds automatically)
+
+`docker-compose.build.yml` builds the image from this checkout and starts the stack. The `APP_IMAGE`
+variable is not used by this file.
+
+```bash
+docker compose -f docker-compose.build.yml up -d --build
+```
+
+### Option B: build the image yourself
+
+Build the image first, set `APP_IMAGE` in `.env`, then start the default compose:
+
+```dotenv
+APP_IMAGE=bookorbit-inpx:latest        # the image you build below, NOT ghcr.io/bookorbit/bookorbit
+```
 
 ```bash
 docker build -t bookorbit-inpx:latest .
@@ -101,6 +145,13 @@ these wrong is the most common cause of permission errors on first scan.
 
 Optionally set `LIBRARY_BROWSE_ROOT=/books` to start the library folder picker at `/books` instead
 of `/`.
+
+### Updating
+
+```bash
+git pull --ff-only
+docker compose -f docker-compose.build.yml up -d --build
+```
 
 ### Importing an INPX library
 
