@@ -31,6 +31,9 @@ import { DEFAULT_LIBRARY_COVER_ASPECT_RATIO, DEFAULT_LIBRARY_ORGANIZATION_MODE, 
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
 
+/** Books removed per transaction when deleting a library; keeps each cascade statement small. */
+const LIBRARY_DELETE_BATCH_SIZE = 1000;
+
 interface LibraryMetadataWriteStreamOptions {
   onProgress?: (event: LibraryFileSyncProgressEvent) => void;
   isCancelled?: () => boolean;
@@ -241,12 +244,38 @@ export class LibraryService {
     const [existing] = await this.libraryRepo.findById(id);
     if (!existing) throw new NotFoundException('Library not found');
 
-    await this.fileWatcherService.stopWatcher(id);
+    const event = 'library.remove';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] libraryId=${id} - library removal started`);
 
-    const bookRows = await this.libraryRepo.findBookIdsByLibrary(id);
-    await this.libraryRepo.delete(id);
-    this.scanScheduler.removeSchedule(id);
-    await this.cleanupCoverDirectories(bookRows.map(({ id: bookId }) => bookId));
+    try {
+      await this.fileWatcherService.stopWatcher(id);
+
+      // A single cascade delete over a large INPX library exceeds statement_timeout, so drain the
+      // books in bounded batches first; the final library delete then has nothing left to cascade
+      // into. Cover directories are cleaned per batch to keep memory bounded.
+      let deletedBooks = 0;
+      for (;;) {
+        const bookIds = await this.libraryRepo.deleteBookBatchByLibrary(id, LIBRARY_DELETE_BATCH_SIZE);
+        if (bookIds.length === 0) break;
+        deletedBooks += bookIds.length;
+        await this.cleanupCoverDirectories(bookIds);
+      }
+
+      await this.libraryRepo.delete(id);
+      this.scanScheduler.removeSchedule(id);
+
+      this.logger.log(
+        `[${event}] [end] libraryId=${id} durationMs=${Date.now() - startedAt} deletedBooks=${deletedBooks} - library removal completed`,
+      );
+    } catch (err) {
+      const errorClass = err instanceof Error ? err.name : 'Error';
+      const errorMessage = sanitizeLogValue(getErrorMessage(err));
+      this.logger.error(
+        `[${event}] [fail] libraryId=${id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - library removal failed`,
+      );
+      throw err;
+    }
   }
 
   async prescan(dto: PrescanLibraryDto) {

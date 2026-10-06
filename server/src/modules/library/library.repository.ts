@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, getTableColumns, inArray, isNotNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { AccessLevel, ContentFilterRules, LibraryStats } from '@bookorbit/types';
 
@@ -123,12 +123,30 @@ export class LibraryRepository {
     return this.db.insert(libraryFolders).values(data).returning();
   }
 
-  findBookIdsByLibrary(libraryId: number) {
-    return this.db.select({ id: books.id }).from(books).where(eq(books.libraryId, libraryId));
-  }
-
   delete(id: number) {
     return this.db.delete(libraries).where(eq(libraries.id, id));
+  }
+
+  /**
+   * Deletes up to `limit` books of a library and everything that cascades from them, returning the
+   * deleted ids.
+   *
+   * Removing a library in one statement cascades into every book and all of their child rows. On a
+   * large INPX library that single statement exceeds the 30s `statement_timeout` and the request
+   * fails with "canceling statement due to statement timeout". Draining the books in bounded
+   * batches keeps every statement small; the caller deletes the now-empty library afterwards.
+   * `statement_timeout` is lifted per batch because a 1000-book batch still fans out across many
+   * tables. Each batch is its own transaction, so an interrupted run resumes where it stopped.
+   */
+  async deleteBookBatchByLibrary(libraryId: number, limit: number): Promise<number[]> {
+    return this.db.transaction(async (tx) => {
+      await tx.execute(sql`set local statement_timeout = 0`);
+      const rows = await tx.select({ id: books.id }).from(books).where(eq(books.libraryId, libraryId)).orderBy(asc(books.id)).limit(limit);
+      if (rows.length === 0) return [];
+      const ids = rows.map((row) => row.id);
+      await tx.delete(books).where(inArray(books.id, ids));
+      return ids;
+    });
   }
 
   deleteFolder(id: number) {

@@ -45,7 +45,7 @@ describe('LibraryService', () => {
     insertFolder: vi.fn(),
     update: vi.fn(),
     deleteFolder: vi.fn(),
-    findBookIdsByLibrary: vi.fn(),
+    deleteBookBatchByLibrary: vi.fn(),
     delete: vi.fn(),
     findAllFolderPaths: vi.fn(),
     getStats: vi.fn(),
@@ -442,13 +442,14 @@ describe('LibraryService', () => {
     expect(libraryRepo.updateDisplayOrders).toHaveBeenCalledWith([3, 1, 2]);
   });
 
-  it('remove deletes library and cleans related cover directories', async () => {
+  it('remove drains books in batches, cleans cover directories, then deletes the library', async () => {
     libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'L' }]);
-    libraryRepo.findBookIdsByLibrary.mockResolvedValue([{ id: 101 }, { id: 102 }]);
+    libraryRepo.deleteBookBatchByLibrary.mockResolvedValueOnce([101, 102]).mockResolvedValueOnce([]);
 
     await service.remove(4);
 
     expect(fileWatcherService.stopWatcher).toHaveBeenCalledWith(4);
+    expect(libraryRepo.deleteBookBatchByLibrary).toHaveBeenCalledWith(4, 1000);
     expect(libraryRepo.delete).toHaveBeenCalledWith(4);
     expect(scanScheduler.removeSchedule).toHaveBeenCalledWith(4);
     expect(mockRm).toHaveBeenCalledWith('/books/covers/101', { recursive: true, force: true });
