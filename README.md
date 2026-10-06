@@ -1,21 +1,13 @@
 <div align="center">
 
-# BookOrbit
+# BookOrbit (INPX fork)
 
-A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and comics.
+A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and comics, with added
+support for **INPX archive catalogs** (Flibusta / FLibrary / FlibRusEc).
 
-[![Latest release](https://img.shields.io/github/v/release/bookorbit/bookorbit?label=latest&style=flat-square)](https://github.com/bookorbit/bookorbit/releases)
-[![Stars](https://img.shields.io/github/stars/bookorbit/bookorbit?style=flat-square&color=FFC72C)](https://github.com/bookorbit/bookorbit/stargazers)
-[![CI](https://img.shields.io/github/actions/workflow/status/bookorbit/bookorbit/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/bookorbit/bookorbit/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/actions/workflow/status/bookorbit/bookorbit/release.yml?style=flat-square&label=release)](https://github.com/bookorbit/bookorbit/actions/workflows/release.yml)
-[![Coverage](https://img.shields.io/codecov/c/github/bookorbit/bookorbit?style=flat-square&flag=server&token=F6TADEFCUV&label=server%20coverage)](https://codecov.io/gh/bookorbit/bookorbit)
-[![Crowdin](https://img.shields.io/badge/Crowdin-translate-2E3340?style=flat-square&logo=crowdin&logoColor=white)](https://crowdin.com/project/bookorbit)
-
-[![Website](https://img.shields.io/badge/Website-bookorbit.app-blue?style=flat-square&logo=googlechrome&logoColor=white&color=4169E1)](https://bookorbit.app)
-[![Demo](https://img.shields.io/badge/Demo-live-brightgreen?style=flat-square&logo=rocket&logoColor=white&color=40a829)](https://demo.bookorbit.app/magic?token=2d92cb900e184cf0eb8b11f72cffc6011673d1016e1b300d750eb3d76abc1572)
-[![GHCR Pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fbookorbit%2Fbookorbit%2Fbookorbit&query=downloadCount&label=Docker%20Pulls&logo=docker&style=flat-square&color=2496ed)](https://github.com/bookorbit/bookorbit/pkgs/container/bookorbit)
-[![Contributing](https://img.shields.io/badge/Contributing-guide-orange?style=flat-square&logo=handshake&logoColor=white)](https://github.com/bookorbit/bookorbit/blob/main/docs/CONTRIBUTING.md)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square&color=B461B3)](LICENSE)
+[![Fork](https://img.shields.io/badge/fork-dimap%2Fbookorbit__inpx-2ea44f?style=flat-square&logo=github)](https://github.com/dimap/bookorbit_inpx)
+[![Upstream](https://img.shields.io/badge/upstream-bookorbit%2Fbookorbit-blue?style=flat-square&logo=github)](https://github.com/bookorbit/bookorbit)
 
 ![BookOrbit dashboard showing reading stats, widgets, and book shelves](docs/images/dashboard-overview.png)
 
@@ -23,23 +15,108 @@ A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and com
 
 ---
 
-## What is BookOrbit?
+## What is this fork?
 
-**[BookOrbit](https://bookorbit.app)** organizes your books and reads them back to you anywhere: the web reader, a Kobo, or KOReader. Progress, highlights, and reading status move between all three, so you can start a chapter in one place and finish it in another.
+This is **[dimap/bookorbit_inpx](https://github.com/dimap/bookorbit_inpx)**, a fork of
+[BookOrbit](https://bookorbit.app). It keeps everything the upstream project does (web readers,
+Kobo and KOReader sync, metadata, statistics, multi-user accounts, and more) and adds the ability to
+import and read from **INPX archive catalogs**.
 
-Around that core sit 14 metadata providers, reading statistics and achievements, OPDS and Send-to-Kindle delivery, multi-user accounts with OIDC/SSO, and automatic sync out to Hardcover, Readwise, and StoryGraph. All of it runs on infrastructure you control.
+An INPX catalog is a ZIP that bundles `.inp` indexes (SQLite databases) together with the book
+archives they reference. This fork reads books straight out of those archives at read and download
+time, so a large Flibusta-style library (hundreds of GB) stays on disk exactly once and nothing is
+copied or unpacked.
 
-[![Visit Website](https://img.shields.io/badge/Visit%20Website-bookorbit.app-4169E1?style=for-the-badge&logo=googlechrome&logoColor=white)](https://bookorbit.app)
+The fork's changes live on the **`feat/inpx-support`** branch. Upstream `main` does not contain them.
 
-## Live Demo
+## What's different from upstream BookOrbit
 
-Try the live instance before you install. No account required.
+### INPX and Flibusta archive support
 
-[![Launch Live Demo](https://img.shields.io/badge/Launch%20Live%20Demo-2ea44f?style=for-the-badge&logo=rocket&logoColor=white)](https://demo.bookorbit.app/magic?token=2d92cb900e184cf0eb8b11f72cffc6011673d1016e1b300d750eb3d76abc1572)
+- **Archive-backed libraries**: register an `.inpx` file, import it, and browse the whole catalog.
+  Books are served directly from the archive when you open or download them.
+- **Companion `.7z` shards**: supports the FlibRusEc / FLibrary layout where each `.inp` index shard
+  is paired with a same-named `.7z` shard holding the actual book files.
+- **No whole-shard extraction**: enrichment opens one book at a time from its shard. The shard is
+  never unpacked in full, so import works without extra disk space.
+- **Content-based format detection**: the real format is sniffed from the file bytes (ZIP EPUB, 7z,
+  or FB2), not from the index extension. FLibrary EPUBs stored as 7z archives are handled too.
+- **Native 7z reader**: reads 7z archives (including solid archives) through the system `7z` binary,
+  with a byte-offset ZIP reader for ordinary EPUBs.
+- **Cover extraction**: for FLibrary EPUBs whose images are not inside the book, the cover is
+  resolved from the EPUB's OPF and fetched from the sidecar `covers/` / `images/` archives.
+- **Metadata enrichment**: FB2 (title, authors, series, ISBN, description, genres, cover) and FLibrary
+  EPUB covers are extracted during import. Enrichment is resumable and reports live progress.
+- **Virtual folders**: each archive gets a virtual `inpx://<archiveId>` library folder. The scanner
+  and file watcher skip it, so INPX books are never flagged missing. Rename and move are rejected for
+  archive-backed files.
+- **UI and progress**: an "INPX archives" panel in the library detail view, plus WebSocket progress
+  for the index and enrich phases.
 
-> **Note:** The demo includes a sample library of public domain books. Some administrative features are limited in the public demo. Self-hosting BookOrbit provides the full experience.
+### Operational fixes
+
+- The runtime Docker image now installs the native `7zip` package required by the archive reader.
+- Postgres gets `shm_size: '1gb'` so heavy catalog queries (series pages, counts) do not abort on
+  Docker's default 64 MB `/dev/shm`.
+
+See [docs/INPX_SUPPORT.md](docs/INPX_SUPPORT.md) for the full data model, API routes, and module map.
+
+## Installation (Docker, built from source)
+
+This fork is not published to GHCR, so you build the image from the `feat/inpx-support` branch. The
+runtime image bundles the native `7z` binary the archive reader needs.
+
+```bash
+git clone -b feat/inpx-support https://github.com/dimap/bookorbit_inpx.git bookorbit
+cd bookorbit
+mkdir -p books data/app data/postgres
+cp .env.example .env
+```
+
+Edit `.env` and set these required values:
+
+```dotenv
+APP_IMAGE=bookorbit-inpx:latest        # the image you build below, NOT ghcr.io/bookorbit/bookorbit
+APP_URL=http://your-server-ip:3000     # the URL you'll open in your browser
+BOOKS_HOST_PATH=./books                # folder on your server where your book files live
+
+POSTGRES_PASSWORD=         # database password           - openssl rand -hex 24
+JWT_SECRET=                # signs login tokens          - openssl rand -hex 32
+SETUP_BOOTSTRAP_TOKEN=     # one-time setup wizard token - openssl rand -hex 16
+```
+
+Build the image and start the stack:
+
+```bash
+docker build -t bookorbit-inpx:latest .
+docker compose up -d
+```
+
+Open `http://your-server-ip:3000` and complete setup using your `SETUP_BOOTSTRAP_TOKEN`. Database
+migrations run automatically on container start.
+
+On a NAS, or any host where your book folder is owned by a user other than UID 1000, also set `PUID`
+and `PGID` to match that owner. Run `id -u` and `id -g` as the owning user to find them. Getting
+these wrong is the most common cause of permission errors on first scan.
+
+Optionally set `LIBRARY_BROWSE_ROOT=/books` to start the library folder picker at `/books` instead
+of `/`.
+
+### Importing an INPX library
+
+1. Put your `.inpx` catalog, its book shards (`.7z` / `.zip`), and any `covers/` / `images/` folders
+   under the host folder mounted at `/books` (the `BOOKS_HOST_PATH` from above).
+2. In BookOrbit, create a library and open its detail panel.
+3. Under **INPX archives**, register the absolute path to the `.inpx` file inside the container
+   (for example `/books/flibusta.inpx`) and start the import.
+4. Watch progress in the panel. You can re-run **Extract metadata** later to fill in covers and
+   descriptions for books that were imported without them.
+
+For lightweight by-language shards, you can register each `.inpx` under the same library.
 
 ## Features
+
+The following is inherited from upstream BookOrbit and is unchanged by this fork.
 
 ### Reading Experience & Sync
 
@@ -63,42 +140,6 @@ Try the live instance before you install. No account required.
 - **Content Delivery**: OPDS support for compatible apps, Send-to-Kindle via email, and browser drag-and-drop uploads.
 - **Automated Ingestion**: Configure a Book Dock drop folder for hands-free importing.
 
-## Quick Start (Docker)
-
-```bash
-mkdir bookorbit && cd bookorbit
-mkdir -p books data/app data/postgres
-curl -fsSLo .env https://raw.githubusercontent.com/bookorbit/bookorbit/main/.env.example
-curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/bookorbit/bookorbit/main/docker-compose.yml
-```
-
-Edit `.env` and set these required values:
-
-```dotenv
-APP_URL=http://your-server-ip:3000   # the URL you'll open in your browser
-BOOKS_HOST_PATH=./books              # folder on your server where your book files live
-
-POSTGRES_PASSWORD=         # database password           - openssl rand -hex 24
-JWT_SECRET=                # signs login tokens          - openssl rand -hex 32
-SETUP_BOOTSTRAP_TOKEN=     # one-time setup wizard token - openssl rand -hex 16
-```
-
-On a NAS, or any host where your book folder is owned by a user other than UID 1000, also set `PUID` and `PGID` to match that owner. Run `id -u` and `id -g` as the owning user to find them. Getting these wrong is the most common cause of permission errors on first scan.
-
-Optionally set `LIBRARY_BROWSE_ROOT=/books` to start the library folder picker at `/books` instead of `/`.
-
-Then start:
-
-```bash
-docker compose up -d
-```
-
-Open `http://your-server-ip:3000` and complete setup using your `SETUP_BOOTSTRAP_TOKEN`.
-
-After configuring OIDC and linking at least one active administrator, you can set `DISABLE_LOCAL_AUTH=true` and restart BookOrbit to remove and reject password sign-in. BookOrbit refuses to start if that would leave no usable OIDC administrator. Set it back to `false` and restart to recover access during an identity-provider outage.
-
-For the full installation guide including reverse proxy setup, file permissions on NAS, external databases, and environment variable reference, see **[bookorbit.app/installation](https://bookorbit.app/installation)**.
-
 ## KOReader Plugin
 
 The BookOrbit plugin for KOReader adds progress sync, two-way annotation sync, and a native catalog browser: navigate, search, and download books from your library without leaving the device.
@@ -115,7 +156,11 @@ The download is pre-configured with your server URL and credentials, so there is
 
 ## Documentation and Contributing
 
-Full documentation is at **[bookorbit.app](https://bookorbit.app/what-is-bookorbit)**, covering libraries, metadata, readers, Kobo sync, OPDS, users and permissions, OIDC setup, and more.
+Upstream documentation is at **[bookorbit.app](https://bookorbit.app/what-is-bookorbit)**, covering libraries, metadata, readers, Kobo sync, OPDS, users and permissions, OIDC setup, and more.
+
+Fork-specific documentation:
+
+- [INPX archive support](docs/INPX_SUPPORT.md): data model, API routes, import pipeline, known limitations.
 
 For setting up book requests, see the [book requests guide](docs/BOOK_REQUESTS.md): indexers,
 download clients, path mappings, automation, and the encryption key they all need.
@@ -124,29 +169,11 @@ For a stopped-snapshot import from Calibre-Web Automated, see the
 [Calibre-Web Automated migration guide](docs/CALIBRE_WEB_AUTOMATED_MIGRATION.md).
 For local development, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). To contribute, see [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the full workflow: branch naming, test expectations, PR checklist, and commit format.
 
-## Repository Activity
-
-![BookOrbit repository activity: commits, issues, and pull requests over the last 30 days](https://repobeats.axiom.co/api/embed/f572f532340ae02697af0a164e3839818071be2c.svg)
-
-## Translations
-
-Help translate BookOrbit into your language on [Crowdin](https://crowdin.com/project/bookorbit).
-
-When adding user-facing text in code, add the Vue I18n key only to `client/src/locales/en.json`. Do not edit non-English catalogs in a feature pull request; untranslated keys fall back to English until Crowdin provides a translation. See [docs/LOCALIZATION.md](docs/LOCALIZATION.md) for the complete workflow.
-
-[![Translation progress](https://raw.githubusercontent.com/bookorbit/bookorbit/generated-charts/translation-progress.svg)](https://crowdin.com/project/bookorbit)
-
-## Star History
-
-[![BookOrbit GitHub star history](https://raw.githubusercontent.com/bookorbit/bookorbit/generated-charts/star-history.svg)](https://github.com/bookorbit/bookorbit/stargazers)
-
-## Support
-
-- **Questions and discussion:** [GitHub Discussions](https://github.com/bookorbit/bookorbit/discussions)
-- **Bug reports:** [GitHub Issues](https://github.com/bookorbit/bookorbit/issues/new?template=bug_report.yml)
-- **Feature requests:** [GitHub Issues](https://github.com/bookorbit/bookorbit/issues/new?template=feature_request.yml)
-- **Security vulnerabilities:** Follow the private reporting process in the [Security Policy](.github/SECURITY.md).
+This fork is based on upstream BookOrbit `main`. When reporting an issue that is not about INPX,
+please check whether it also reproduces on
+[upstream BookOrbit](https://github.com/bookorbit/bookorbit) first.
 
 ## License
 
-BookOrbit is licensed under the **[GNU Affero General Public License v3.0](LICENSE)**.
+BookOrbit is licensed under the **[GNU Affero General Public License v3.0](LICENSE)**. This fork is
+distributed under the same license.
